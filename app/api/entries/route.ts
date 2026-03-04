@@ -2,103 +2,67 @@ import { NextRequest, NextResponse } from "next/server"
 import { createServiceClient } from "@/lib/supabase-server"
 import crypto from "crypto"
 
-// POST - Create a new entry (public)
+// POST - Fallback: submit entry with a manually-uploaded image (multipart/form-data)
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServiceClient()
     const formData = await request.formData()
 
-    const handle = formData.get("handle") as string
-    const contact = formData.get("contact") as string | null
-    const consent = formData.get("consent") === "true"
+    const handle = (formData.get("handle") as string)?.trim()
+    const contact = (formData.get("contact") as string | null)?.trim() || null
     const imageFile = formData.get("image") as File | null
-    const imageUrl = formData.get("imageUrl") as string | null
 
-    if (!handle?.trim()) {
-      return NextResponse.json({ error: "Social handle is required" }, { status: 400 })
+    if (!handle) {
+      return NextResponse.json({ success: false, message: "Instagram handle is required" }, { status: 400 })
     }
-    if (!consent) {
-      return NextResponse.json({ error: "Consent is required" }, { status: 400 })
-    }
-    if (!imageFile && !imageUrl) {
-      return NextResponse.json({ error: "Profile image is required" }, { status: 400 })
+    if (!imageFile || imageFile.size === 0) {
+      return NextResponse.json({ success: false, message: "Profile image is required" }, { status: 400 })
     }
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
-      return NextResponse.json({ error: "Invalid email" }, { status: 400 })
+      return NextResponse.json({ success: false, message: "Invalid email" }, { status: 400 })
     }
 
-    let storedImageUrl: string
+    // Upload to Supabase Storage
+    const ext = imageFile.name.split(".").pop()?.toLowerCase() || "jpg"
+    const safeExt = ["jpg", "jpeg", "png", "gif", "webp"].includes(ext) ? ext : "jpg"
+    const fileName = `${crypto.randomUUID()}.${safeExt}`
+    const buffer = Buffer.from(await imageFile.arrayBuffer())
 
-    if (imageFile) {
-      const ext = imageFile.name.split(".").pop()?.toLowerCase() || "jpg"
-      const safeExt = ["jpg", "jpeg", "png", "gif", "webp"].includes(ext) ? ext : "jpg"
-      const fileName = `${crypto.randomUUID()}.${safeExt}`
-      const buffer = Buffer.from(await imageFile.arrayBuffer())
+    const { error: uploadError } = await supabase.storage
+      .from("profile-images")
+      .upload(fileName, buffer, { contentType: imageFile.type, upsert: false })
 
-      const { error: uploadError } = await supabase.storage
-        .from("profile-images")
-        .upload(fileName, buffer, {
-          contentType: imageFile.type,
-          upsert: false,
-        })
-
-      if (uploadError) {
-        return NextResponse.json({ error: "Failed to upload image" }, { status: 500 })
-      }
-
-      const { data: publicUrl } = supabase.storage
-        .from("profile-images")
-        .getPublicUrl(fileName)
-
-      storedImageUrl = publicUrl.publicUrl
-    } else if (imageUrl) {
-      // Handle base64 data URL from auto-fetch
-      const dataUrlMatch = imageUrl.match(/^data:(image\/(jpeg|png|gif|webp));base64,(.+)$/)
-      if (!dataUrlMatch) {
-        return NextResponse.json({ error: "Invalid image data" }, { status: 400 })
-      }
-
-      const contentType = dataUrlMatch[1]
-      const ext = dataUrlMatch[2] === "jpeg" ? "jpg" : dataUrlMatch[2]
-      const base64Data = dataUrlMatch[3]
-      const fileName = `${crypto.randomUUID()}.${ext}`
-      const buffer = Buffer.from(base64Data, "base64")
-
-      const { error: uploadError } = await supabase.storage
-        .from("profile-images")
-        .upload(fileName, buffer, {
-          contentType,
-          upsert: false,
-        })
-
-      if (uploadError) {
-        return NextResponse.json({ error: "Failed to store image" }, { status: 500 })
-      }
-
-      const { data: publicUrl } = supabase.storage
-        .from("profile-images")
-        .getPublicUrl(fileName)
-
-      storedImageUrl = publicUrl.publicUrl
-    } else {
-      return NextResponse.json({ error: "Image is required" }, { status: 400 })
+    if (uploadError) {
+      console.error("Storage upload error:", uploadError)
+      return NextResponse.json({ success: false, message: "Failed to upload image" }, { status: 500 })
     }
 
+    const { data: publicUrl } = supabase.storage
+      .from("profile-images")
+      .getPublicUrl(fileName)
+
+    // Insert entry row
     const { error: dbError } = await supabase.from("entries").insert({
-      handle: handle.trim(),
-      contact: contact?.trim() || null,
-      image_url: storedImageUrl,
+      handle: handle.replace(/^@/, ""),
+      contact,
+      image_url: publicUrl.publicUrl,
       consent: true,
       status: "pending",
     })
 
     if (dbError) {
-      return NextResponse.json({ error: "Failed to save entry" }, { status: 500 })
+      console.error("DB insert error:", dbError)
+      return NextResponse.json({ success: false, message: "Failed to save entry" }, { status: 500 })
     }
 
-    return NextResponse.json({ success: true })
-  } catch {
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    return NextResponse.json({
+      success: true,
+      message: "Entry submitted successfully",
+      imageUrl: publicUrl.publicUrl,
+    })
+  } catch (err) {
+    console.error("POST /api/entries error:", err)
+    return NextResponse.json({ success: false, message: "Internal server error" }, { status: 500 })
   }
 }
 
