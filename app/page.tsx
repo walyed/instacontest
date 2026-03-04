@@ -14,7 +14,7 @@ export default function HomePage() {
               Contest Entry
             </h1>
             <p className="text-sm text-muted-foreground leading-relaxed">
-              Enter your Instagram handle below for a chance to win. We&apos;ll try to fetch your profile picture automatically!
+              Enter your Instagram handle and upload your profile image below for a chance to win!
             </p>
           </div>
           <ContestEntryForm />

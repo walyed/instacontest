@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, type FormEvent } from "react"
+import { useState, useRef, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -11,7 +11,6 @@ import { ImagePlus, Loader2, X } from "lucide-react"
 export function ContestEntryForm() {
   const router = useRouter()
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const [handle, setHandle] = useState("")
   const [contact, setContact] = useState("")
@@ -21,55 +20,11 @@ export function ContestEntryForm() {
 
   const [image, setImage] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
-  const [autoImageUrl, setAutoImageUrl] = useState<string | null>(null)
-  const [fetchingImage, setFetchingImage] = useState(false)
-
-  // Debounced auto-fetch when handle changes
-  useEffect(() => {
-    if (debounceRef.current) clearTimeout(debounceRef.current)
-
-    const cleanHandle = handle.replace(/^@/, "").trim()
-    if (!cleanHandle || cleanHandle.length < 2 || !/^[a-zA-Z0-9._]{1,30}$/.test(cleanHandle)) {
-      setAutoImageUrl(null)
-      setFetchingImage(false)
-      return
-    }
-
-    // Don't auto-fetch if user already uploaded manually
-    if (image) return
-
-    debounceRef.current = setTimeout(async () => {
-      setFetchingImage(true)
-      try {
-        const res = await fetch(`/api/instagram?handle=${encodeURIComponent(cleanHandle)}`)
-        const data = await res.json()
-        if (data.imageUrl) {
-          setAutoImageUrl(data.imageUrl)
-          setErrors((prev) => {
-            const next = { ...prev }
-            delete next.image
-            return next
-          })
-        } else {
-          setAutoImageUrl(null)
-        }
-      } catch {
-        setAutoImageUrl(null)
-      } finally {
-        setFetchingImage(false)
-      }
-    }, 800)
-
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current)
-    }
-  }, [handle, image])
 
   function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (file) {
       setImage(file)
-      setAutoImageUrl(null)
       const reader = new FileReader()
       reader.onloadend = () => setImagePreview(reader.result as string)
       reader.readAsDataURL(file)
@@ -84,7 +39,6 @@ export function ContestEntryForm() {
   function removeImage() {
     setImage(null)
     setImagePreview(null)
-    setAutoImageUrl(null)
     if (fileInputRef.current) fileInputRef.current.value = ""
   }
 
@@ -92,7 +46,7 @@ export function ContestEntryForm() {
     const errs: Record<string, string> = {}
     if (!handle.trim()) errs.handle = "Instagram handle is required"
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) errs.contact = "Please enter a valid email"
-    if (!image && !autoImageUrl) errs.image = "Profile image is required"
+    if (!image) errs.image = "Profile image is required"
     if (!consent) errs.consent = "You must agree to the terms"
     return errs
   }
@@ -108,48 +62,25 @@ export function ContestEntryForm() {
     setLoading(true)
 
     try {
-      if (image) {
-        // User uploaded an image manually → POST FormData to /api/entries
-        const formData = new FormData()
-        formData.append("handle", handle.trim())
-        if (contact.trim()) formData.append("contact", contact.trim())
-        formData.append("image", image)
+      const formData = new FormData()
+      formData.append("handle", handle.trim())
+      if (contact.trim()) formData.append("contact", contact.trim())
+      formData.append("image", image!)
 
-        const res = await fetch("/api/entries", { method: "POST", body: formData })
-        const data = await res.json()
+      const res = await fetch("/api/entries", { method: "POST", body: formData })
+      const data = await res.json()
 
-        if (!data.success) {
-          setErrors({ submit: data.message || "Failed to submit entry" })
-          setLoading(false)
-          return
-        }
-        router.push("/success")
-      } else {
-        // Auto-fetched image available → POST JSON to /api/instagram (saves entry server-side)
-        const res = await fetch("/api/instagram", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            handle: handle.trim(),
-            contact: contact.trim() || undefined,
-          }),
-        })
-        const data = await res.json()
-
-        if (data.success) {
-          router.push("/success")
-        } else {
-          setErrors({ submit: data.message || "Failed to submit entry" })
-          setLoading(false)
-        }
+      if (!data.success) {
+        setErrors({ submit: data.message || "Failed to submit entry" })
+        setLoading(false)
+        return
       }
+      router.push("/success")
     } catch {
       setErrors({ submit: "Something went wrong. Please try again." })
       setLoading(false)
     }
   }
-
-  const displayedPreview = imagePreview || autoImageUrl
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-6">
@@ -202,17 +133,10 @@ export function ContestEntryForm() {
           id="image-upload"
           aria-label="Upload profile image"
         />
-        {fetchingImage ? (
-          <div className="flex flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border bg-muted/50 py-8">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
-              Looking for your Instagram profile picture…
-            </p>
-          </div>
-        ) : displayedPreview ? (
+        {imagePreview ? (
           <div className="relative w-full">
             <div className="relative overflow-hidden rounded-xl border border-border bg-muted aspect-square max-w-[200px]">
-              <img src={displayedPreview} alt="Preview" className="h-full w-full object-cover" />
+              <img src={imagePreview} alt="Preview" className="h-full w-full object-cover" />
             </div>
             <button
               type="button"
@@ -222,14 +146,6 @@ export function ContestEntryForm() {
             >
               <X className="h-4 w-4" />
             </button>
-            {autoImageUrl && !image && (
-              <p className="mt-2 text-xs text-muted-foreground">
-                Fetched from Instagram.{" "}
-                <label htmlFor="image-upload" className="cursor-pointer underline hover:text-foreground">
-                  Upload a different image
-                </label>
-              </p>
-            )}
           </div>
         ) : (
           <label
