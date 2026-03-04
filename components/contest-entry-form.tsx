@@ -18,8 +18,6 @@ export function ContestEntryForm() {
   const [loading, setLoading] = useState(false)
   const [errors, setErrors] = useState<Record<string, string>>({})
 
-  // Manual-upload fallback state
-  const [needsManualUpload, setNeedsManualUpload] = useState(false)
   const [image, setImage] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
 
@@ -48,7 +46,6 @@ export function ContestEntryForm() {
     const errs: Record<string, string> = {}
     if (!handle.trim()) errs.handle = "Instagram handle is required"
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) errs.contact = "Please enter a valid email"
-    if (needsManualUpload && !image) errs.image = "Please upload an image"
     if (!consent) errs.consent = "You must agree to the terms"
     return errs
   }
@@ -64,8 +61,8 @@ export function ContestEntryForm() {
     setLoading(true)
 
     try {
-      if (needsManualUpload && image) {
-        // ---- Fallback: POST FormData with uploaded image ----
+      if (image) {
+        // ---- User uploaded an image manually → use /api/entries ----
         const formData = new FormData()
         formData.append("handle", handle.trim())
         if (contact.trim()) formData.append("contact", contact.trim())
@@ -82,7 +79,7 @@ export function ContestEntryForm() {
 
         router.push("/success")
       } else {
-        // ---- Primary: POST JSON — server fetches IG pic + saves entry ----
+        // ---- No image uploaded → try auto-fetch from Instagram ----
         const res = await fetch("/api/instagram", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -96,9 +93,8 @@ export function ContestEntryForm() {
         if (data.success) {
           router.push("/success")
         } else {
-          // IG fetch failed → show manual upload UI
-          setNeedsManualUpload(true)
-          setErrors({ image: data.message || "Please upload an image manually" })
+          // IG fetch failed
+          setErrors({ image: "Could not fetch your Instagram profile picture. Please upload an image manually." })
           setLoading(false)
         }
       }
@@ -119,12 +115,6 @@ export function ContestEntryForm() {
           value={handle}
           onChange={(e) => {
             setHandle(e.target.value)
-            // Reset manual-upload state when handle changes
-            if (needsManualUpload) {
-              setNeedsManualUpload(false)
-              setImage(null)
-              setImagePreview(null)
-            }
             if (errors.handle) {
               setErrors((prev) => { const next = { ...prev }; delete next.handle; return next })
             }
@@ -154,47 +144,46 @@ export function ContestEntryForm() {
         {errors.contact && <p className="text-sm text-destructive">{errors.contact}</p>}
       </div>
 
-      {/* Manual upload area — shown only when auto-fetch failed */}
-      {needsManualUpload && (
-        <div className="flex flex-col gap-2">
-          <Label>Profile Image</Label>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            onChange={handleImageChange}
-            className="sr-only"
-            id="image-upload"
-            aria-label="Upload profile image"
-          />
-          {imagePreview ? (
-            <div className="relative w-full">
-              <div className="relative overflow-hidden rounded-xl border border-border bg-muted aspect-square max-w-[200px]">
-                <img src={imagePreview} alt="Preview" className="h-full w-full object-cover" />
-              </div>
-              <button
-                type="button"
-                onClick={removeImage}
-                className="absolute top-2 left-[172px] flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-80"
-                aria-label="Remove image"
-              >
-                <X className="h-4 w-4" />
-              </button>
+      <div className="flex flex-col gap-2">
+        <Label>
+          Profile Image <span className="text-muted-foreground font-normal">(optional — we&apos;ll try Instagram first)</span>
+        </Label>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          onChange={handleImageChange}
+          className="sr-only"
+          id="image-upload"
+          aria-label="Upload profile image"
+        />
+        {imagePreview ? (
+          <div className="relative w-full">
+            <div className="relative overflow-hidden rounded-xl border border-border bg-muted aspect-square max-w-[200px]">
+              <img src={imagePreview} alt="Preview" className="h-full w-full object-cover" />
             </div>
-          ) : (
-            <label
-              htmlFor="image-upload"
-              className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border bg-muted/50 py-8 transition-colors hover:border-foreground/30 hover:bg-muted"
+            <button
+              type="button"
+              onClick={removeImage}
+              className="absolute top-2 left-[172px] flex h-7 w-7 items-center justify-center rounded-full bg-foreground text-background transition-opacity hover:opacity-80"
+              aria-label="Remove image"
             >
-              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-foreground/10">
-                <ImagePlus className="h-5 w-5 text-muted-foreground" />
-              </div>
-              <p className="text-sm text-muted-foreground">Click to upload your profile image</p>
-            </label>
-          )}
-          {errors.image && <p className="text-sm text-destructive">{errors.image}</p>}
-        </div>
-      )}
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        ) : (
+          <label
+            htmlFor="image-upload"
+            className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-border bg-muted/50 py-8 transition-colors hover:border-foreground/30 hover:bg-muted"
+          >
+            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-foreground/10">
+              <ImagePlus className="h-5 w-5 text-muted-foreground" />
+            </div>
+            <p className="text-sm text-muted-foreground">Click to upload your image</p>
+          </label>
+        )}
+        {errors.image && <p className="text-sm text-destructive">{errors.image}</p>}
+      </div>
 
       <div className="flex flex-col gap-2">
         <div className="flex items-start gap-3">
