@@ -16,11 +16,14 @@ function isRateLimited(ip: string): boolean {
 const USERNAME_RE = /^[a-zA-Z0-9._]{1,30}$/
 
 function isValidInstagramImageUrl(url: string): boolean {
+  if (!url.startsWith("https://")) return false
+  // Reject Instagram's static assets (logos, icons) — these are NOT profile pics
+  if (url.includes("/rsrc.php/") || url.includes("static.cdninstagram.com")) return false
+  // Real profile pics come from scontent CDN or fbcdn
   return (
-    url.startsWith("https://") &&
-    (url.includes("instagram") ||
-      url.includes("cdninstagram") ||
-      url.includes("fbcdn"))
+    url.includes("scontent") ||
+    url.includes("fbcdn") ||
+    url.includes("cdninstagram.com/v")
   )
 }
 
