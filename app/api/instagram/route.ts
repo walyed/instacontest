@@ -311,7 +311,103 @@ async function strategy6(username: string): Promise<StrategyResult> {
   return result
 }
 
-const ALL_STRATEGIES = [strategy1, strategy2, strategy3, strategy4, strategy5, strategy6]
+// ─── Strategy 7: ?__a=1&__d=dis JSON endpoint ────────────────────────
+// Appending ?__a=1&__d=dis to a profile URL sometimes returns JSON
+// with full user data including profile_pic_url_hd.
+async function strategy7(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "S7-json-a1-endpoint",
+    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
+  }
+  const start = Date.now()
+  try {
+    const res = await fetch(
+      `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "*/*",
+          "Accept-Language": "en-US,en;q=0.9",
+          Referer: "https://www.instagram.com/",
+          "x-ig-app-id": "936619743392459",
+        },
+        cache: "no-store",
+      }
+    )
+    result.status = res.status
+    const text = await res.text()
+    result.bodyPreview = text.substring(0, 600)
+    result.htmlLength = text.length
+
+    if (res.ok) {
+      try {
+        const data = JSON.parse(text)
+        // The response structure can vary — try multiple paths
+        const pic =
+          data?.graphql?.user?.profile_pic_url_hd ||
+          data?.graphql?.user?.profile_pic_url ||
+          data?.data?.user?.profile_pic_url_hd ||
+          data?.data?.user?.profile_pic_url ||
+          data?.user?.profile_pic_url_hd ||
+          data?.user?.profile_pic_url
+        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
+      } catch { result.error = "JSON parse failed" }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy 8: Instagram GraphQL query by username ─────────────────
+// Uses Instagram's public GraphQL endpoint with a known query hash
+// for fetching user profile data.
+async function strategy8(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "S8-graphql-query",
+    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
+  }
+  const start = Date.now()
+  try {
+    // Known query hash for user profile lookup
+    const queryHash = "c9100bf9110dd6361671f113dd02e7d6"
+    const variables = JSON.stringify({ username, include_reel: false })
+    const url = `https://www.instagram.com/graphql/query/?query_hash=${queryHash}&variables=${encodeURIComponent(variables)}`
+
+    const res = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
+        "x-ig-app-id": "936619743392459",
+        "x-requested-with": "XMLHttpRequest",
+      },
+      cache: "no-store",
+    })
+    result.status = res.status
+    const text = await res.text()
+    result.bodyPreview = text.substring(0, 600)
+    result.htmlLength = text.length
+
+    if (res.ok) {
+      try {
+        const data = JSON.parse(text)
+        const pic =
+          data?.data?.user?.profile_pic_url_hd ||
+          data?.data?.user?.profile_pic_url
+        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
+      } catch { result.error = "JSON parse failed" }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+const ALL_STRATEGIES = [strategy1, strategy2, strategy7, strategy8, strategy3, strategy4, strategy5, strategy6]
 
 /**
  * GET /api/instagram?username=<handle>
