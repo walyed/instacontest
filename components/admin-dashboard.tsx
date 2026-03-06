@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
+import JSZip from "jszip"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -116,31 +117,38 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
     }
   }
 
-  // ─── Download all profile images as individual files ───────────────
+  // ─── Download all profile images bundled into a single ZIP ───────────
   const [downloadingAll, setDownloadingAll] = useState(false)
 
   async function downloadAllImages() {
     const list = filteredEntries.filter((e) => e.imageUrl)
     if (list.length === 0) return
     setDownloadingAll(true)
-    for (const entry of list) {
-      try {
-        const res = await fetch(entry.imageUrl)
-        const blob = await res.blob()
-        const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg"
-        const url = URL.createObjectURL(blob)
-        const link = document.createElement("a")
-        link.href = url
-        link.download = `${entry.handle}.${ext}`
-        link.click()
-        URL.revokeObjectURL(url)
-        // small delay so browser can handle each download
-        await new Promise((r) => setTimeout(r, 300))
-      } catch {
-        // skip failed downloads
-      }
+    try {
+      const zip = new JSZip()
+      await Promise.all(
+        list.map(async (entry) => {
+          try {
+            const res = await fetch(entry.imageUrl)
+            const blob = await res.blob()
+            const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg"
+            const arrayBuffer = await blob.arrayBuffer()
+            zip.file(`${entry.handle}.${ext}`, arrayBuffer)
+          } catch {
+            // skip failed image
+          }
+        })
+      )
+      const content = await zip.generateAsync({ type: "blob" })
+      const url = URL.createObjectURL(content)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = "contest-images.zip"
+      link.click()
+      URL.revokeObjectURL(url)
+    } finally {
+      setDownloadingAll(false)
     }
-    setDownloadingAll(false)
   }
 
   // CSV-escape: wrap in quotes if the value contains commas, quotes, or newlines
