@@ -207,7 +207,118 @@ async function strategyUnavatar(username: string): Promise<StrategyResult> {
   return result
 }
 
-const ALL_STRATEGIES = [strategySimpleOgImage, strategyTopSearch, strategyInstagramApi, strategyUnavatar]
+// ─── Strategy: Microlink.io metadata extraction ──────────────────────
+// Microlink fetches pages from ITS servers (different IPs than Vercel)
+// and extracts og:image. Free tier: 50 req/day.
+async function strategyMicrolink(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "microlink",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+    const res = await fetch(
+      `https://api.microlink.io/?url=${encodeURIComponent(targetUrl)}`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+    const data = await res.json()
+    result.detail = `mlStatus=${data.status}`
+    if (data.status === "success") {
+      const imgUrl = data.data?.image?.url
+      if (imgUrl && isRealProfilePicUrl(imgUrl)) {
+        result.imageUrl = imgUrl
+      } else {
+        result.detail += `, imgUrl=${imgUrl?.substring(0, 100) ?? "none"}`
+      }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy: jsonlink.io OG tag extraction ─────────────────────────
+// Another third-party service that extracts Open Graph tags from its own IPs.
+async function strategyJsonLink(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "jsonlink",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+    const res = await fetch(
+      `https://jsonlink.io/api/extract?url=${encodeURIComponent(targetUrl)}`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+    const data = await res.json()
+    const images: string[] = data?.images ?? []
+    result.detail = `images=${images.length}`
+    const realPic = images.find((u: string) => isRealProfilePicUrl(u))
+    if (realPic) {
+      result.imageUrl = realPic
+    } else if (images.length > 0) {
+      result.detail += `, first=${images[0]?.substring(0, 100)}`
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy: ScraperAPI residential proxy (optional) ───────────────
+// Routes through residential IPs — guaranteed to bypass Instagram blocking.
+// Free: 1000 req/month at scraperapi.com. Set SCRAPER_API_KEY in Vercel env.
+async function strategyScraperProxy(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "scraper-proxy",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const apiKey = process.env.SCRAPER_API_KEY
+  if (!apiKey) {
+    result.error = "SCRAPER_API_KEY not configured"
+    return result
+  }
+  const start = Date.now()
+  try {
+    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+    const res = await fetch(
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&render=false`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+    const html = await res.text()
+    result.detail = `htmlLen=${html.length}`
+    const ogMatch =
+      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
+      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
+    if (ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1])) {
+      result.imageUrl = ogMatch[1]
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+const ALL_STRATEGIES = [
+  strategyScraperProxy,   // Residential proxy (needs SCRAPER_API_KEY env var)
+  strategyMicrolink,      // Third-party metadata extraction
+  strategyJsonLink,       // Third-party OG extraction
+  strategySimpleOgImage,  // Direct og:image (Python-style)
+  strategyTopSearch,      // Direct Instagram search API
+  strategyInstagramApi,   // Direct Instagram API
+  strategyUnavatar,       // unavatar.io with validation
+]
 
 /**
  * GET /api/instagram?username=<handle>
