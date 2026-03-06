@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback, type FormEvent } from "react"
+import { useState, useRef, type FormEvent } from "react"
 import { useRouter } from "next/navigation"
 import { Input } from "@/components/ui/input"
 import { Button } from "@/components/ui/button"
@@ -22,63 +22,11 @@ export function ContestEntryForm() {
   const [image, setImage] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
 
-  // Auto-fetch state — fetched from /api/instagram when the user types a handle
-  const [autoImageUrl, setAutoImageUrl] = useState<string | null>(null)
-  const [fetchingImage, setFetchingImage] = useState(false)
-
-  // ─── Auto-fetch Instagram profile image with debounce ──────────────
-  const fetchImage = useCallback(async (username: string) => {
-    // Only attempt if it looks like a valid IG username (1-30 alphanumeric/._)
-    const clean = username.replace(/^@/, "").trim()
-    if (!clean || !/^[a-zA-Z0-9._]{1,30}$/.test(clean)) {
-      setAutoImageUrl(null)
-      return
-    }
-
-    setFetchingImage(true)
-    try {
-      console.log(`[auto-fetch] Calling /api/instagram?username=${clean}`)
-      const res = await fetch(`/api/instagram?username=${encodeURIComponent(clean)}`)
-      console.log(`[auto-fetch] Response status: ${res.status}`)
-      const data = await res.json()
-      console.log(`[auto-fetch] Response data:`, data)
-      if (data.image) {
-        setAutoImageUrl(data.image)
-        // Clear the "image required" error when auto-fetch succeeds
-        setErrors((prev) => {
-          const next = { ...prev }
-          delete next.image
-          return next
-        })
-      } else {
-        console.log(`[auto-fetch] No image in response, error: ${data.error}`)
-        setAutoImageUrl(null)
-      }
-    } catch (err) {
-      console.error(`[auto-fetch] Exception:`, err)
-      setAutoImageUrl(null)
-    } finally {
-      setFetchingImage(false)
-    }
-  }, [])
-
-  // Debounce: wait 800ms after the user stops typing to fire the request
-  useEffect(() => {
-    // If user already uploaded a file, skip auto-fetch
-    if (image) return
-
-    const timer = setTimeout(() => {
-      fetchImage(handle)
-    }, 800)
-    return () => clearTimeout(timer)
-  }, [handle, fetchImage, image])
-
   // ─── Manual image upload handlers ──────────────────────────────────
   function handleImageChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (file) {
       setImage(file)
-      setAutoImageUrl(null) // manual upload takes priority
       const reader = new FileReader()
       reader.onloadend = () => setImagePreview(reader.result as string)
       reader.readAsDataURL(file)
@@ -93,12 +41,8 @@ export function ContestEntryForm() {
   function removeImage() {
     setImage(null)
     setImagePreview(null)
-    setAutoImageUrl(null)
     if (fileInputRef.current) fileInputRef.current.value = ""
   }
-
-  // The preview to display: manual upload wins, then auto-fetched
-  const displayPreview = imagePreview ?? autoImageUrl
 
   // ─── Validation ────────────────────────────────────────────────────
   function validate(): Record<string, string> {
@@ -106,8 +50,7 @@ export function ContestEntryForm() {
     if (!handle.trim()) errs.handle = "Instagram handle is required"
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact))
       errs.contact = "Please enter a valid email"
-    // Allow submission when there's either a manual upload or an auto-fetched image
-    if (!image && !autoImageUrl) errs.image = "Profile image is required"
+    if (!image) errs.image = "Profile image is required"
     if (!consent) errs.consent = "You must agree to the terms"
     return errs
   }
@@ -127,14 +70,7 @@ export function ContestEntryForm() {
       const formData = new FormData()
       formData.append("handle", handle.trim())
       if (contact.trim()) formData.append("contact", contact.trim())
-
-      if (image) {
-        // User uploaded a file manually — send it as before
-        formData.append("image", image)
-      } else if (autoImageUrl) {
-        // No manual upload but auto-fetch succeeded — pass the URL
-        formData.append("autoImageUrl", autoImageUrl)
-      }
+      formData.append("image", image!)
 
       const res = await fetch("/api/entries", { method: "POST", body: formData })
       const data = await res.json()
@@ -193,23 +129,15 @@ export function ContestEntryForm() {
         {errors.contact && <p className="text-sm text-destructive">{errors.contact}</p>}
       </div>
 
-      {/* ── Profile image (auto-fetch preview + manual upload) ───── */}
+      {/* ── Profile image (manual upload only) ────────────────────── */}
       <div className="flex flex-col gap-2">
         <Label>Profile Image</Label>
 
-        {/* Loading spinner while auto-fetching */}
-        {fetchingImage && (
-          <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/50 px-4 py-6 justify-center">
-            <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
-            <span className="text-sm text-muted-foreground">Fetching profile image…</span>
-          </div>
-        )}
-
-        {/* Preview (either manual upload or auto-fetched) */}
-        {!fetchingImage && displayPreview && (
+        {/* Preview */}
+        {imagePreview && (
           <div className="relative w-full">
             <div className="relative overflow-hidden rounded-xl border border-border bg-muted aspect-square max-w-[200px]">
-              <img src={displayPreview} alt="Preview" className="h-full w-full object-cover" />
+              <img src={imagePreview} alt="Preview" className="h-full w-full object-cover" />
             </div>
             <button
               type="button"
@@ -219,16 +147,11 @@ export function ContestEntryForm() {
             >
               <X className="h-4 w-4" />
             </button>
-            {autoImageUrl && !image && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Auto-fetched from Instagram — or upload your own below.
-              </p>
-            )}
           </div>
         )}
 
-        {/* Upload zone — always visible when no preview is showing */}
-        {!fetchingImage && !displayPreview && (
+        {/* Upload zone */}
+        {!imagePreview && (
           <>
             <input
               ref={fileInputRef}
@@ -246,13 +169,13 @@ export function ContestEntryForm() {
               <div className="flex h-10 w-10 items-center justify-center rounded-full bg-foreground/10">
                 <ImagePlus className="h-5 w-5 text-muted-foreground" />
               </div>
-              <p className="text-sm text-muted-foreground">Click to upload your image</p>
+              <p className="text-sm text-muted-foreground">Click to upload your profile image</p>
             </label>
           </>
         )}
 
-        {/* Secondary upload when preview is showing (swap image) */}
-        {!fetchingImage && displayPreview && (
+        {/* Swap image when preview is showing */}
+        {imagePreview && (
           <>
             <input
               ref={fileInputRef}
