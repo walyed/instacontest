@@ -15,30 +15,14 @@ function isRateLimited(ip: string): boolean {
 
 const USERNAME_RE = /^[a-zA-Z0-9._]{1,30}$/
 
-// Allowlisted domains we accept as valid image sources
-const ALLOWED_HOSTS = [
-  "scontent",
-  "fbcdn",
-  "cdninstagram.com",
-  "unavatar.io",
-  "picuki.com",
-  "imginn.com",
-  "imgsed.com",
-  "gramhir.com",
-  "pixwox.com",
-  "storiesig.info",
-]
-
-function isAllowedImageUrl(url: string): boolean {
+function isRealProfilePicUrl(url: string): boolean {
   if (!url.startsWith("https://")) return false
-  // Reject Instagram static assets (logos/icons)
   if (url.includes("/rsrc.php/") || url.includes("static.cdninstagram.com")) return false
-  try {
-    const host = new URL(url).hostname
-    return ALLOWED_HOSTS.some((h) => host.includes(h))
-  } catch {
-    return false
-  }
+  return (
+    url.includes("scontent") ||
+    url.includes("fbcdn") ||
+    url.includes("cdninstagram.com/v")
+  )
 }
 
 // ─── Debug result type ───────────────────────────────────────────────
@@ -51,47 +35,20 @@ interface StrategyResult {
   detail?: string
 }
 
-// Helper: extract og:image or profile pic URL from HTML
-function extractImageFromHtml(html: string): string | null {
-  // og:image
-  const ogMatch =
-    html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
-    html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
-  if (ogMatch?.[1] && isAllowedImageUrl(ogMatch[1])) return ogMatch[1]
-
-  // Profile pic in JSON blobs
-  const jsonPic =
-    html.match(/"profile_pic_url_hd"\s*:\s*"(https?:[^"]+)"/) ??
-    html.match(/"profile_pic_url"\s*:\s*"(https?:[^"]+)"/)
-  if (jsonPic?.[1]) {
-    const decoded = jsonPic[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-    if (isAllowedImageUrl(decoded)) return decoded
-  }
-
-  // Any <img> with scontent/fbcdn/cdninstagram src
-  const imgTag = html.match(/<img[^>]+src="(https:\/\/[^"]*(?:scontent|fbcdn|cdninstagram\.com\/v)[^"]*)"/i)
-  if (imgTag?.[1] && isAllowedImageUrl(imgTag[1])) return imgTag[1]
-
-  return null
-}
-
-// ─── Strategy 1: Scrape picuki.com ───────────────────────────────────
-// Picuki is a public Instagram viewer — serves profile pics to any IP.
-async function strategyPicuki(username: string): Promise<StrategyResult> {
+// ─── Strategy 1: Simple og:image (mirrors the Python script exactly) ─
+// The user's friend's Python script does: requests.get(url, headers={"User-Agent": "Mozilla/5.0"})
+// then parses og:image. This works from residential IPs.
+async function strategySimpleOgImage(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S1-picuki",
+    name: "S1-simple-og-image",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
   try {
     const res = await fetch(
-      `https://www.picuki.com/profile/${encodeURIComponent(username)}`,
+      `https://www.instagram.com/${encodeURIComponent(username)}/`,
       {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
+        headers: { "User-Agent": "Mozilla/5.0" },
         redirect: "follow",
         cache: "no-store",
       }
@@ -100,18 +57,14 @@ async function strategyPicuki(username: string): Promise<StrategyResult> {
     if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
 
     const html = await res.text()
-    result.detail = `htmlLen=${html.length}`
+    result.detail = `htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
 
-    // Picuki profile pic: <img class="profile-avatar" src="...">
-    // or any img with profile-related class
-    const avatarMatch =
-      html.match(/<img[^>]+class="[^"]*profile[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+src="([^"]+)"[^>]+class="[^"]*profile[^"]*"/i)
-    if (avatarMatch?.[1]?.startsWith("http")) {
-      result.imageUrl = avatarMatch[1]
-    } else {
-      // Fallback: og:image
-      result.imageUrl = extractImageFromHtml(html)
+    // og:image — exactly what the Python script does with BeautifulSoup
+    const ogMatch =
+      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
+      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
+    if (ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1])) {
+      result.imageUrl = ogMatch[1]
     }
   } catch (err) {
     result.error = String(err)
@@ -120,84 +73,42 @@ async function strategyPicuki(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy 2: Scrape imginn.com (imgsed) ─────────────────────────
-async function strategyImginn(username: string): Promise<StrategyResult> {
+// ─── Strategy 2: Instagram Top Search API ────────────────────────────
+// Instagram's search endpoint can return profile pic URLs and is
+// sometimes less aggressively blocked than profile page endpoints.
+async function strategyTopSearch(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S2-imginn",
+    name: "S2-topsearch-api",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
   try {
     const res = await fetch(
-      `https://imginn.com/${encodeURIComponent(username)}/`,
+      `https://www.instagram.com/web/search/topsearch/?query=${encodeURIComponent(username)}`,
       {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
+          Accept: "application/json",
+          "x-ig-app-id": "936619743392459",
+          "x-requested-with": "XMLHttpRequest",
+          Referer: "https://www.instagram.com/",
         },
-        redirect: "follow",
         cache: "no-store",
       }
     )
     result.status = res.status
     if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
 
-    const html = await res.text()
-    result.detail = `htmlLen=${html.length}`
-
-    // imginn profile pic: <img class="avatar" or userinfo area
-    const avatarMatch =
-      html.match(/<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+src="([^"]+)"[^>]+class="[^"]*avatar[^"]*"/i) ??
-      html.match(/<div[^>]+class="[^"]*userinfo[^"]*"[^>]*>[\s\S]*?<img[^>]+src="([^"]+)"/i)
-    if (avatarMatch?.[1]?.startsWith("http")) {
-      result.imageUrl = avatarMatch[1]
-    } else {
-      result.imageUrl = extractImageFromHtml(html)
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 3: Scrape gramhir.com ─────────────────────────────────
-async function strategyGramhir(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S3-gramhir",
-    status: null, elapsedMs: 0, imageUrl: null, error: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://gramhir.com/profile/${encodeURIComponent(username)}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        redirect: "follow",
-        cache: "no-store",
-      }
+    const data = await res.json()
+    // Find the exact username match in search results
+    const users: Array<{ user: { username: string; profile_pic_url: string } }> = data?.users ?? []
+    const match = users.find(
+      (u) => u.user?.username?.toLowerCase() === username.toLowerCase()
     )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-
-    const html = await res.text()
-    result.detail = `htmlLen=${html.length}`
-
-    const avatarMatch =
-      html.match(/<img[^>]+class="[^"]*profile[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+src="([^"]+)"[^>]+class="[^"]*profile[^"]*"/i)
-    if (avatarMatch?.[1]?.startsWith("http")) {
-      result.imageUrl = avatarMatch[1]
-    } else {
-      result.imageUrl = extractImageFromHtml(html)
+    if (match?.user?.profile_pic_url && isRealProfilePicUrl(match.user.profile_pic_url)) {
+      result.imageUrl = match.user.profile_pic_url
     }
+    result.detail = `usersFound=${users.length}`
   } catch (err) {
     result.error = String(err)
   }
@@ -205,52 +116,10 @@ async function strategyGramhir(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy 4: unavatar.io (GET, follow redirects) ─────────────────
-async function strategyUnavatar(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S4-unavatar",
-    status: null, elapsedMs: 0, imageUrl: null, error: null,
-  }
-  const start = Date.now()
-  try {
-    // Use GET and follow redirects — download the image to verify it's real
-    const url = `https://unavatar.io/instagram/${encodeURIComponent(username)}?fallback=false`
-    const res = await fetch(url, {
-      redirect: "follow",
-      cache: "no-store",
-      headers: {
-        Accept: "image/*,*/*;q=0.8",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-      },
-    })
-    result.status = res.status
-    const ct = res.headers.get("content-type") || ""
-
-    if (res.ok && ct.startsWith("image/")) {
-      // Read the image bytes to verify it's a real profile pic, not a logo
-      const bytes = await res.arrayBuffer()
-      const size = bytes.byteLength
-      result.detail = `ct=${ct}, size=${size}, finalUrl=${res.url}`
-      // Real profile pics are typically > 5KB; Instagram logo fallbacks are tiny
-      if (size > 5000) {
-        result.imageUrl = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
-      } else {
-        result.error = `Image too small (${size} bytes) — likely a fallback logo`
-      }
-    } else {
-      result.detail = `ct=${ct}, finalUrl=${res.url}`
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 5: Instagram internal API (backup) ─────────────────────
+// ─── Strategy 3: Instagram internal API ──────────────────────────────
 async function strategyInstagramApi(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S5-instagram-api",
+    name: "S3-instagram-api",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
@@ -259,11 +128,9 @@ async function strategyInstagramApi(username: string): Promise<StrategyResult> {
       `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`,
       {
         headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "User-Agent": "Instagram 275.0.0.27.98 Android",
           "x-ig-app-id": "936619743392459",
           Accept: "*/*",
-          Referer: "https://www.instagram.com/",
-          Origin: "https://www.instagram.com",
         },
         cache: "no-store",
       }
@@ -273,7 +140,7 @@ async function strategyInstagramApi(username: string): Promise<StrategyResult> {
       try {
         const data = await res.json()
         const pic = data?.data?.user?.profile_pic_url_hd || data?.data?.user?.profile_pic_url
-        if (pic && isAllowedImageUrl(pic)) result.imageUrl = pic
+        if (pic && isRealProfilePicUrl(pic)) result.imageUrl = pic
       } catch { result.error = "JSON parse failed" }
     }
   } catch (err) {
@@ -283,40 +150,55 @@ async function strategyInstagramApi(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy 6: Scrape pixwox.com ───────────────────────────────────
-async function strategyPixwox(username: string): Promise<StrategyResult> {
+// ─── Strategy 4: unavatar.io with image download + validation ────────
+async function strategyUnavatar(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S6-pixwox",
+    name: "S4-unavatar",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
   try {
-    const res = await fetch(
-      `https://www.pixwox.com/profile/${encodeURIComponent(username)}/`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        redirect: "follow",
-        cache: "no-store",
-      }
-    )
+    const url = `https://unavatar.io/instagram/${encodeURIComponent(username)}?fallback=false`
+    const res = await fetch(url, {
+      redirect: "follow",
+      cache: "no-store",
+      headers: { Accept: "image/*,*/*;q=0.8" },
+    })
     result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+    const ct = res.headers.get("content-type") || ""
 
-    const html = await res.text()
-    result.detail = `htmlLen=${html.length}`
+    if (res.ok && ct.startsWith("image/")) {
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      const size = bytes.byteLength
+      result.detail = `ct=${ct}, size=${size}`
 
-    const avatarMatch =
-      html.match(/<img[^>]+class="[^"]*avatar[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+class="[^"]*profile[^"]*"[^>]+src="([^"]+)"/i) ??
-      html.match(/<img[^>]+src="([^"]+)"[^>]+class="[^"]*avatar[^"]*"/i)
-    if (avatarMatch?.[1]?.startsWith("http")) {
-      result.imageUrl = avatarMatch[1]
+      // Check if image is the Instagram logo by reading PNG header for dimensions
+      // PNG: bytes 16-19 = width, bytes 20-23 = height (big-endian)
+      let isPng = bytes[0] === 0x89 && bytes[1] === 0x50 // PNG magic
+      let width = 0
+      let height = 0
+      if (isPng && bytes.length > 24) {
+        width = (bytes[16] << 24) | (bytes[17] << 16) | (bytes[18] << 8) | bytes[19]
+        height = (bytes[20] << 24) | (bytes[21] << 16) | (bytes[22] << 8) | bytes[23]
+        result.detail += `, png=${width}x${height}`
+      }
+
+      // Real Instagram profile pics: 150x150, 320x320, 640x640, etc.
+      // Instagram logo from unavatar is typically a non-square or very specific size
+      // Reject if too small or if the final URL redirected to a generic fallback
+      const finalUrl = res.url
+      const isFallback =
+        finalUrl.includes("fallback") ||
+        finalUrl.includes("default") ||
+        finalUrl.includes("placeholder")
+
+      if (size > 5000 && !isFallback) {
+        result.imageUrl = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
+      } else {
+        result.error = `Rejected: size=${size}, isFallback=${isFallback}`
+      }
     } else {
-      result.imageUrl = extractImageFromHtml(html)
+      result.detail = `ct=${ct}`
     }
   } catch (err) {
     result.error = String(err)
@@ -325,7 +207,7 @@ async function strategyPixwox(username: string): Promise<StrategyResult> {
   return result
 }
 
-const ALL_STRATEGIES = [strategyUnavatar, strategyInstagramApi, strategyPicuki, strategyImginn, strategyGramhir, strategyPixwox]
+const ALL_STRATEGIES = [strategySimpleOgImage, strategyTopSearch, strategyInstagramApi, strategyUnavatar]
 
 /**
  * GET /api/instagram?username=<handle>
