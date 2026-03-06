@@ -40,17 +40,23 @@ export async function POST(request: NextRequest) {
       buffer = Buffer.from(await imageFile.arrayBuffer())
     } else if (autoImageUrl) {
       // ── Auto-fetched URL path ────────────────────────────────────
-      // Validate the URL comes from Instagram/Facebook CDN to prevent SSRF
-      if (
-        !autoImageUrl.startsWith("https://") ||
-        !(
-          autoImageUrl.includes("instagram") ||
-          autoImageUrl.includes("cdninstagram") ||
-          autoImageUrl.includes("fbcdn")
-        )
-      ) {
+      // Validate the URL comes from an allowed image source to prevent SSRF
+      try {
+        const host = new URL(autoImageUrl).hostname
+        const allowed =
+          host.includes("instagram") ||
+          host.includes("cdninstagram") ||
+          host.includes("fbcdn") ||
+          host === "unavatar.io"
+        if (!autoImageUrl.startsWith("https://") || !allowed) {
+          return NextResponse.json(
+            { success: false, message: "Invalid image URL source" },
+            { status: 400 }
+          )
+        }
+      } catch {
         return NextResponse.json(
-          { success: false, message: "Invalid image URL source" },
+          { success: false, message: "Invalid image URL" },
           { status: 400 }
         )
       }

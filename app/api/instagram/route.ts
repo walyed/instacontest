@@ -15,90 +15,21 @@ function isRateLimited(ip: string): boolean {
 
 const USERNAME_RE = /^[a-zA-Z0-9._]{1,30}$/
 
-function isValidInstagramImageUrl(url: string): boolean {
+// Allowlisted domains we accept as valid image sources
+function isAllowedImageSource(url: string): boolean {
   if (!url.startsWith("https://")) return false
-  // Reject Instagram's static assets (logos, icons) — these are NOT profile pics
-  if (url.includes("/rsrc.php/") || url.includes("static.cdninstagram.com")) return false
-  // Real profile pics come from scontent CDN or fbcdn
-  return (
-    url.includes("scontent") ||
-    url.includes("fbcdn") ||
-    url.includes("cdninstagram.com/v")
-  )
-}
-
-// ─── Deep HTML extraction ────────────────────────────────────────────
-// Instagram embeds user data in JS blobs even on login walls.
-// This function searches through the full HTML for profile pic URLs.
-function extractProfilePicFromHtml(html: string): string | null {
-  // 1. Standard profile_pic_url_hd / profile_pic_url in JSON
-  const jsonPicMatch =
-    html.match(/"profile_pic_url_hd"\s*:\s*"(https?:[^"]+)"/) ??
-    html.match(/"profile_pic_url"\s*:\s*"(https?:[^"]+)"/)
-  if (jsonPicMatch?.[1]) {
-    const decoded = jsonPicMatch[1]
-      .replace(/\\u0026/g, "&")
-      .replace(/\\\//g, "/")
-      .replace(/\\u003C/g, "<")
-      .replace(/\\u003E/g, ">")
-    if (isValidInstagramImageUrl(decoded)) return decoded
+  try {
+    const host = new URL(url).hostname
+    return (
+      host.includes("scontent") ||
+      host.includes("fbcdn") ||
+      host.includes("cdninstagram.com") ||
+      host === "unavatar.io" ||
+      host === "avatars.githubusercontent.com"
+    )
+  } catch {
+    return false
   }
-
-  // 2. og:image meta tag
-  const ogMatch =
-    html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*\/?>/i) ??
-    html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["'][^>]*\/?>/i)
-  if (ogMatch?.[1] && isValidInstagramImageUrl(ogMatch[1])) return ogMatch[1]
-
-  // 3. LD+JSON structured data
-  const ldJsonBlocks = html.matchAll(/<script\s+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)
-  for (const block of ldJsonBlocks) {
-    try {
-      const data = JSON.parse(block[1])
-      const img = data?.image || data?.thumbnailUrl || data?.mainEntityOfPage?.image
-      if (typeof img === "string" && isValidInstagramImageUrl(img)) return img
-    } catch { /* skip */ }
-  }
-
-  // 4. Look for "hd_profile_pic_url_info" which has a URL
-  const hdPicMatch = html.match(/"hd_profile_pic_url_info"\s*:\s*\{[^}]*"url"\s*:\s*"(https?:[^"]+)"/)
-  if (hdPicMatch?.[1]) {
-    const decoded = hdPicMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-    if (isValidInstagramImageUrl(decoded)) return decoded
-  }
-
-  // 5. Find any scontent CDN URLs that look like profile pictures
-  // Profile pics typically have /v/t51 or /v/t1 in the path
-  const scontentMatches = html.matchAll(/"(https?:\\?\/\\?\/scontent[^"]+)"/g)
-  for (const m of scontentMatches) {
-    const decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
-    // Profile pics are usually small-ish image files
-    if (decoded.includes("/v/t51") || decoded.includes("/v/t1")) {
-      if (isValidInstagramImageUrl(decoded)) return decoded
-    }
-  }
-
-  // 6. Search for any fbcdn.net URLs with image patterns
-  const fbcdnMatches = html.matchAll(/"(https?:\\?\/\\?\/[^"]*fbcdn\.net[^"]*(?:\.jpg|\.jpeg|\.png|\.webp)[^"]*)"/g)
-  for (const m of fbcdnMatches) {
-    const decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
-    if (isValidInstagramImageUrl(decoded)) return decoded
-  }
-
-  return null
-}
-
-// For debug: find ALL potential image URLs in HTML
-function findAllCdnUrls(html: string): string[] {
-  const urls: string[] = []
-  const allMatches = html.matchAll(/"(https?:\\?\/\\?\/(?:scontent|[^"]*fbcdn\.net|[^"]*cdninstagram)[^"]*)"/g)
-  for (const m of allMatches) {
-    let decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
-    // Skip static assets
-    if (decoded.includes("/rsrc.php/") || decoded.includes("static.cdninstagram.com")) continue
-    if (!urls.includes(decoded)) urls.push(decoded)
-  }
-  return urls.slice(0, 20) // max 20
 }
 
 // ─── Debug result type ───────────────────────────────────────────────
@@ -106,19 +37,99 @@ interface StrategyResult {
   name: string
   status: number | null
   elapsedMs: number
-  bodyPreview: string
   imageUrl: string | null
   error: string | null
-  loginWall: boolean | null
-  htmlLength: number | null
-  cdnUrls?: string[] // debug only: all CDN URLs found
+  finalUrl?: string | null
+  contentType?: string | null
 }
 
-// ─── Strategy 1: i.instagram.com internal API ────────────────────────
-async function strategy1(username: string): Promise<StrategyResult> {
+// ─── Strategy 1: unavatar.io avatar proxy (primary) ──────────────────
+// unavatar.io is a free open-source service that resolves social avatars.
+// It handles the Instagram scraping/caching on their infrastructure.
+async function strategyUnavatar(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S1-internal-api (i.instagram.com)",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
+    name: "S1-unavatar-proxy",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    const url = `https://unavatar.io/instagram/${encodeURIComponent(username)}?fallback=false`
+    // Use HEAD with manual redirect to check if it resolves to a real image
+    const res = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      cache: "no-store",
+    })
+    result.status = res.status
+
+    if (res.status >= 300 && res.status < 400) {
+      // Redirect — check if it redirects to a CDN URL
+      const location = res.headers.get("location")
+      result.finalUrl = location
+      if (location && isAllowedImageSource(location)) {
+        result.imageUrl = location
+      } else if (location?.startsWith("https://")) {
+        // Redirected to the image on some other CDN — use original unavatar URL
+        result.imageUrl = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
+      }
+    } else if (res.status === 200) {
+      const ct = res.headers.get("content-type") || ""
+      result.contentType = ct
+      if (ct.startsWith("image/")) {
+        // unavatar proxied the image directly
+        result.imageUrl = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
+      }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy 2: unavatar.io generic (tries multiple sources) ────────
+async function strategyUnavatarGeneric(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "S2-unavatar-generic",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    const url = `https://unavatar.io/${encodeURIComponent(username)}?fallback=false`
+    const res = await fetch(url, {
+      method: "HEAD",
+      redirect: "manual",
+      cache: "no-store",
+    })
+    result.status = res.status
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location")
+      result.finalUrl = location
+      if (location && isAllowedImageSource(location)) {
+        result.imageUrl = location
+      } else if (location?.startsWith("https://")) {
+        result.imageUrl = `https://unavatar.io/${encodeURIComponent(username)}`
+      }
+    } else if (res.status === 200) {
+      const ct = res.headers.get("content-type") || ""
+      result.contentType = ct
+      if (ct.startsWith("image/")) {
+        result.imageUrl = `https://unavatar.io/${encodeURIComponent(username)}`
+      }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy 3: Instagram internal API (backup) ─────────────────────
+async function strategyInstagramApi(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "S3-instagram-api",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
   try {
@@ -129,7 +140,6 @@ async function strategy1(username: string): Promise<StrategyResult> {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
           "x-ig-app-id": "936619743392459",
           Accept: "*/*",
-          "Accept-Language": "en-US,en;q=0.9",
           Referer: "https://www.instagram.com/",
           Origin: "https://www.instagram.com",
         },
@@ -137,15 +147,11 @@ async function strategy1(username: string): Promise<StrategyResult> {
       }
     )
     result.status = res.status
-    const text = await res.text()
-    result.bodyPreview = text.substring(0, 600)
-    result.htmlLength = text.length
-
     if (res.ok) {
       try {
-        const data = JSON.parse(text)
+        const data = await res.json()
         const pic = data?.data?.user?.profile_pic_url_hd || data?.data?.user?.profile_pic_url
-        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
+        if (pic && isAllowedImageSource(pic)) result.imageUrl = pic
       } catch { result.error = "JSON parse failed" }
     }
   } catch (err) {
@@ -155,11 +161,11 @@ async function strategy1(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy 2: www.instagram.com web API ───────────────────────────
-async function strategy2(username: string): Promise<StrategyResult> {
+// ─── Strategy 4: Instagram web API (backup) ──────────────────────────
+async function strategyInstagramWebApi(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "S2-web-api (www.instagram.com/api)",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
+    name: "S4-instagram-web-api",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const start = Date.now()
   try {
@@ -177,15 +183,11 @@ async function strategy2(username: string): Promise<StrategyResult> {
       }
     )
     result.status = res.status
-    const text = await res.text()
-    result.bodyPreview = text.substring(0, 600)
-    result.htmlLength = text.length
-
     if (res.ok) {
       try {
-        const data = JSON.parse(text)
+        const data = await res.json()
         const pic = data?.data?.user?.profile_pic_url_hd || data?.data?.user?.profile_pic_url
-        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
+        if (pic && isAllowedImageSource(pic)) result.imageUrl = pic
       } catch { result.error = "JSON parse failed" }
     }
   } catch (err) {
@@ -195,255 +197,7 @@ async function strategy2(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy 3: HTML page with Googlebot UA ─────────────────────────
-async function strategy3(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S3-html-googlebot",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/${encodeURIComponent(username)}/`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-
-    const html = await res.text()
-    result.htmlLength = html.length
-    result.bodyPreview = html.substring(0, 600)
-    result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
-
-    result.imageUrl = extractProfilePicFromHtml(html)
-    result.cdnUrls = findAllCdnUrls(html)
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 4: HTML page with mobile Chrome UA ─────────────────────
-async function strategy4(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S4-html-mobile-chrome",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/${encodeURIComponent(username)}/`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-
-    const html = await res.text()
-    result.htmlLength = html.length
-    result.bodyPreview = html.substring(0, 600)
-    result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
-
-    result.imageUrl = extractProfilePicFromHtml(html)
-    result.cdnUrls = findAllCdnUrls(html)
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 5: Desktop Chrome with full realistic headers ──────────
-async function strategy5(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S5-html-desktop-full-headers",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/${encodeURIComponent(username)}/`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.5",
-          "Sec-Fetch-Dest": "document",
-          "Sec-Fetch-Mode": "navigate",
-          "Sec-Fetch-Site": "none",
-          "Sec-Fetch-User": "?1",
-          "Upgrade-Insecure-Requests": "1",
-          "Cache-Control": "max-age=0",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-
-    const html = await res.text()
-    result.htmlLength = html.length
-    result.bodyPreview = html.substring(0, 600)
-    result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
-
-    result.imageUrl = extractProfilePicFromHtml(html)
-    result.cdnUrls = findAllCdnUrls(html)
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 6: Instagram embed endpoint ────────────────────────────
-async function strategy6(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S6-embed-page",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/${encodeURIComponent(username)}/embed/`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-
-    const html = await res.text()
-    result.htmlLength = html.length
-    result.bodyPreview = html.substring(0, 600)
-
-    result.imageUrl = extractProfilePicFromHtml(html)
-    result.cdnUrls = findAllCdnUrls(html)
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 7: ?__a=1&__d=dis JSON endpoint ────────────────────────
-// Appending ?__a=1&__d=dis to a profile URL sometimes returns JSON
-// with full user data including profile_pic_url_hd.
-async function strategy7(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S7-json-a1-endpoint",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    const res = await fetch(
-      `https://www.instagram.com/${encodeURIComponent(username)}/?__a=1&__d=dis`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-          Accept: "*/*",
-          "Accept-Language": "en-US,en;q=0.9",
-          Referer: "https://www.instagram.com/",
-          "x-ig-app-id": "936619743392459",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    const text = await res.text()
-    result.bodyPreview = text.substring(0, 600)
-    result.htmlLength = text.length
-
-    if (res.ok) {
-      try {
-        const data = JSON.parse(text)
-        // The response structure can vary — try multiple paths
-        const pic =
-          data?.graphql?.user?.profile_pic_url_hd ||
-          data?.graphql?.user?.profile_pic_url ||
-          data?.data?.user?.profile_pic_url_hd ||
-          data?.data?.user?.profile_pic_url ||
-          data?.user?.profile_pic_url_hd ||
-          data?.user?.profile_pic_url
-        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
-      } catch { result.error = "JSON parse failed" }
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy 8: Instagram GraphQL query by username ─────────────────
-// Uses Instagram's public GraphQL endpoint with a known query hash
-// for fetching user profile data.
-async function strategy8(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "S8-graphql-query",
-    status: null, elapsedMs: 0, bodyPreview: "", imageUrl: null, error: null, loginWall: null, htmlLength: null,
-  }
-  const start = Date.now()
-  try {
-    // Known query hash for user profile lookup
-    const queryHash = "c9100bf9110dd6361671f113dd02e7d6"
-    const variables = JSON.stringify({ username, include_reel: false })
-    const url = `https://www.instagram.com/graphql/query/?query_hash=${queryHash}&variables=${encodeURIComponent(variables)}`
-
-    const res = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        Accept: "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        Referer: `https://www.instagram.com/${encodeURIComponent(username)}/`,
-        "x-ig-app-id": "936619743392459",
-        "x-requested-with": "XMLHttpRequest",
-      },
-      cache: "no-store",
-    })
-    result.status = res.status
-    const text = await res.text()
-    result.bodyPreview = text.substring(0, 600)
-    result.htmlLength = text.length
-
-    if (res.ok) {
-      try {
-        const data = JSON.parse(text)
-        const pic =
-          data?.data?.user?.profile_pic_url_hd ||
-          data?.data?.user?.profile_pic_url
-        if (pic && isValidInstagramImageUrl(pic)) result.imageUrl = pic
-      } catch { result.error = "JSON parse failed" }
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-const ALL_STRATEGIES = [strategy1, strategy2, strategy7, strategy8, strategy3, strategy4, strategy5, strategy6]
+const ALL_STRATEGIES = [strategyUnavatar, strategyUnavatarGeneric, strategyInstagramApi, strategyInstagramWebApi]
 
 /**
  * GET /api/instagram?username=<handle>
@@ -496,7 +250,7 @@ export async function GET(request: NextRequest) {
         console.log(`[instagram] SUCCESS for ${username} via ${r.name} in ${r.elapsedMs}ms`)
         return NextResponse.json({ image: r.imageUrl })
       }
-      console.log(`[instagram] ${r.name}: status=${r.status}, loginWall=${r.loginWall}, htmlLen=${r.htmlLength}, error=${r.error}`)
+      console.log(`[instagram] ${r.name}: status=${r.status}, error=${r.error}`)
     } catch (err) {
       console.error(`[instagram] Exception:`, err)
     }
