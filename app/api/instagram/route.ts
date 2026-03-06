@@ -215,71 +215,143 @@ function extractOgImage(html: string): string | null {
   return ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1]) ? ogMatch[1] : null
 }
 
-// ─── Strategy: ScraperAPI (standard datacenter, then with JS render) ─
-// Free plan: 5000 credits. Standard = 1 credit. Render = 10 credits.
-// ScraperAPI uses different datacenter IPs than Vercel — may not be blocked.
-async function strategyScraperProxy(username: string): Promise<StrategyResult> {
+// Helper: extract profile_pic_url from embedded JSON in HTML
+function extractProfilePicFromScript(html: string): string | null {
+  const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
+                   html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
+  if (picMatch?.[1]) {
+    const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
+    if (isRealProfilePicUrl(decoded)) return decoded
+  }
+  return null
+}
+
+// ─── Strategy: Google Cache ──────────────────────────────────────────
+// Google's cache serves pages that were crawled by Googlebot.
+// Instagram allows Googlebot, so cached pages contain real og:image.
+async function strategyGoogleCache(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "scraper-proxy",
+    name: "google-cache",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
-  const apiKey = process.env.SCRAPER_API_KEY
-  if (!apiKey) {
-    result.error = "SCRAPER_API_KEY not configured"
-    return result
-  }
   const start = Date.now()
-  const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
-
-  // First try: standard datacenter proxy (1 credit)
   try {
-    const res = await fetch(
-      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}`,
-      { cache: "no-store" }
-    )
+    const cacheUrl = `https://webcache.googleusercontent.com/search?q=cache:https://www.instagram.com/${encodeURIComponent(username)}/`
+    const res = await fetch(cacheUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        Accept: "text/html",
+      },
+      redirect: "follow",
+      cache: "no-store",
+    })
     result.status = res.status
     if (res.ok) {
       const html = await res.text()
-      result.detail = `std: htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
-      const img = extractOgImage(html)
-      if (img) { result.imageUrl = img; result.elapsedMs = Date.now() - start; return result }
+      result.detail = `htmlLen=${html.length}`
+      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
+      if (img) result.imageUrl = img
     }
   } catch (err) {
-    result.detail = `std: ${String(err)}`
+    result.error = String(err)
   }
+  result.elapsedMs = Date.now() - start
+  return result
+}
 
-  // Second try: with JavaScript rendering (10 credits)
+// ─── Strategy: Wayback Machine ───────────────────────────────────────
+// Fetches the most recent archived version of the Instagram profile page.
+// The archived page was crawled by the Wayback Machine bot, which Instagram
+// typically allows, so it should contain the real og:image.
+async function strategyWaybackMachine(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "wayback",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    // First, find the most recent snapshot URL via the CDX API
+    const cdxUrl = `https://archive.org/wayback/available?url=instagram.com/${encodeURIComponent(username)}/`
+    const cdxRes = await fetch(cdxUrl, { cache: "no-store" })
+    result.status = cdxRes.status
+    if (!cdxRes.ok) { result.elapsedMs = Date.now() - start; return result }
+
+    const cdxData = await cdxRes.json()
+    const snapshot = cdxData?.archived_snapshots?.closest
+    if (!snapshot?.url) {
+      result.detail = "no snapshot found"
+      result.elapsedMs = Date.now() - start
+      return result
+    }
+
+    result.detail = `snapshot=${snapshot.timestamp}`
+
+    // Fetch the archived page
+    const archiveUrl: string = snapshot.url.replace("http://", "https://")
+    const res = await fetch(archiveUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      redirect: "follow",
+      cache: "no-store",
+    })
+    result.status = res.status
+    if (res.ok) {
+      const html = await res.text()
+      result.detail += `, htmlLen=${html.length}`
+      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
+      if (img) result.imageUrl = img
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy: Instagram Embed page ──────────────────────────────────
+// The /embed/ endpoint is designed for third-party embedding and may
+// have different blocking rules. Contains profile pic in the HTML.
+async function strategyEmbed(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "embed",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
   try {
     const res = await fetch(
-      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&render=true`,
-      { cache: "no-store" }
+      `https://www.instagram.com/${encodeURIComponent(username)}/embed/`,
+      {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          Accept: "text/html",
+        },
+        redirect: "follow",
+        cache: "no-store",
+      }
     )
     result.status = res.status
     if (res.ok) {
       const html = await res.text()
-      result.detail = (result.detail ?? "") + ` | render: htmlLen=${html.length}`
-      const img = extractOgImage(html)
+      result.detail = `htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
+      // Embed pages have profile pics in img tags or JSON
+      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
       if (img) { result.imageUrl = img }
-      // Also check for profile_pic_url in JSON-LD or script tags
+      // Also check for img tags with profile pic class
       if (!img) {
-        const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
-                         html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
-        if (picMatch?.[1]) {
-          const decoded = picMatch[1].replace(/\\u0026/g, "&")
-          if (isRealProfilePicUrl(decoded)) result.imageUrl = decoded
+        const imgTag = html.match(/<img[^>]+class="[^"]*(?:avatar|profile)[^"]*"[^>]+src="([^"]+)"/i) ??
+                       html.match(/<img[^>]+src="(https:\/\/[^"]*scontent[^"]+)"/i)
+        if (imgTag?.[1] && isRealProfilePicUrl(imgTag[1])) {
+          result.imageUrl = imgTag[1]
         }
       }
     }
   } catch (err) {
-    result.detail = (result.detail ?? "") + ` | render: ${String(err)}`
+    result.error = String(err)
   }
-
   result.elapsedMs = Date.now() - start
   return result
 }
 
 // ─── Strategy: allorigins.win CORS proxy ─────────────────────────────
-// Routes the request through allorigins.win servers (different IPs).
 async function strategyAllOrigins(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
     name: "allorigins",
@@ -296,17 +368,8 @@ async function strategyAllOrigins(username: string): Promise<StrategyResult> {
     if (res.ok) {
       const html = await res.text()
       result.detail = `htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
-      const img = extractOgImage(html)
+      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
       if (img) result.imageUrl = img
-      // Also check for embedded JSON profile pic
-      if (!img) {
-        const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
-                         html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
-        if (picMatch?.[1]) {
-          const decoded = picMatch[1].replace(/\\u0026/g, "&")
-          if (isRealProfilePicUrl(decoded)) result.imageUrl = decoded
-        }
-      }
     }
   } catch (err) {
     result.error = String(err)
@@ -315,8 +378,41 @@ async function strategyAllOrigins(username: string): Promise<StrategyResult> {
   return result
 }
 
+// ─── Strategy: ScraperAPI datacenter proxy ───────────────────────────
+async function strategyScraperProxy(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "scraper-proxy",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const apiKey = process.env.SCRAPER_API_KEY
+  if (!apiKey) { result.error = "SCRAPER_API_KEY not set"; return result }
+  const start = Date.now()
+  const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+
+  // Standard datacenter proxy (1 credit)
+  try {
+    const res = await fetch(
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (res.ok) {
+      const html = await res.text()
+      result.detail = `htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
+      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
+      if (img) { result.imageUrl = img; result.elapsedMs = Date.now() - start; return result }
+    } else {
+      result.detail = `status=${res.status}`
+    }
+  } catch (err) {
+    result.detail = `err: ${String(err)}`
+  }
+
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
 // ─── Strategy: Microlink with prerender ──────────────────────────────
-// Microlink prerender uses headless Chrome to fetch pages.
 async function strategyMicrolink(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
     name: "microlink",
@@ -348,60 +444,15 @@ async function strategyMicrolink(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy: ScraperAPI proxied Instagram API ──────────────────────
-// Route the Instagram internal API through ScraperAPI's IPs
-async function strategyScraperInstagramApi(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "scraper-ig-api",
-    status: null, elapsedMs: 0, imageUrl: null, error: null,
-  }
-  const apiKey = process.env.SCRAPER_API_KEY
-  if (!apiKey) {
-    result.error = "SCRAPER_API_KEY not configured"
-    return result
-  }
-  const start = Date.now()
-  try {
-    // Route the Instagram API endpoint through ScraperAPI
-    const igUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`
-    const res = await fetch(
-      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(igUrl)}`,
-      {
-        headers: {
-          "User-Agent": "Instagram 275.0.0.27.98 Android",
-          "x-ig-app-id": "936619743392459",
-        },
-        cache: "no-store",
-      }
-    )
-    result.status = res.status
-    if (res.ok) {
-      try {
-        const data = await res.json()
-        const pic = data?.data?.user?.profile_pic_url_hd || data?.data?.user?.profile_pic_url
-        if (pic && isRealProfilePicUrl(pic)) result.imageUrl = pic
-        result.detail = `hasUser=${!!data?.data?.user}`
-      } catch {
-        const text = await res.clone().text().catch(() => "")
-        result.error = `JSON parse failed, starts with: ${text.substring(0, 50)}`
-      }
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
 const ALL_STRATEGIES = [
-  strategyScraperProxy,         // ScraperAPI: datacenter proxy, then JS render
-  strategyScraperInstagramApi,  // ScraperAPI: route IG internal API through proxy
-  strategyAllOrigins,           // allorigins.win CORS proxy
-  strategyMicrolink,            // Microlink with prerender
-  strategySimpleOgImage,        // Direct og:image (Python-style)
-  strategyTopSearch,            // Direct Instagram search API
-  strategyInstagramApi,         // Direct Instagram API
-  strategyUnavatar,             // unavatar.io with validation
+  strategyGoogleCache,    // Google's cached version (Googlebot is allowed by Instagram)
+  strategyWaybackMachine, // Wayback Machine archived version
+  strategyEmbed,          // Instagram embed endpoint (different blocking rules)
+  strategyAllOrigins,     // allorigins.win CORS proxy
+  strategyScraperProxy,   // ScraperAPI datacenter proxy
+  strategyMicrolink,      // Microlink with prerender
+  strategySimpleOgImage,  // Direct og:image
+  strategyInstagramApi,   // Direct Instagram API
 ]
 
 /**
