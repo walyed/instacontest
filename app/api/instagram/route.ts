@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import { createServiceClient } from "@/lib/supabase-server"
 
 // ─── Rate-limit state ────────────────────────────────────────────────
 const MAX_REQUESTS = 15
@@ -274,8 +275,9 @@ async function strategyGoogleCache(username: string): Promise<StrategyResult> {
 
 // ─── Strategy: Wayback Machine ───────────────────────────────────────
 // Fetches the most recent archived version of the Instagram profile page.
-// The archived page was crawled by the Wayback Machine bot, which Instagram
-// typically allows, so it should contain the real og:image.
+// Extracts the profile pic CDN URL, then tries to download the image
+// through the Wayback Machine im_ proxy. If successful, uploads the
+// image to Supabase storage and returns a permanent URL.
 async function strategyWaybackMachine(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
     name: "wayback",
@@ -283,7 +285,7 @@ async function strategyWaybackMachine(username: string): Promise<StrategyResult>
   }
   const start = Date.now()
   try {
-    // First, find the most recent snapshot URL via the CDX API
+    // Step 1: Find the most recent snapshot
     const cdxUrl = `https://archive.org/wayback/available?url=instagram.com/${encodeURIComponent(username)}/`
     const cdxRes = await fetch(cdxUrl, { cache: "no-store" })
     result.status = cdxRes.status
@@ -299,7 +301,7 @@ async function strategyWaybackMachine(username: string): Promise<StrategyResult>
 
     result.detail = `snapshot=${snapshot.timestamp}`
 
-    // Fetch the archived page
+    // Step 2: Fetch the archived profile HTML page
     const archiveUrl: string = snapshot.url.replace("http://", "https://")
     const res = await fetch(archiveUrl, {
       headers: { "User-Agent": "Mozilla/5.0" },
@@ -307,11 +309,79 @@ async function strategyWaybackMachine(username: string): Promise<StrategyResult>
       cache: "no-store",
     })
     result.status = res.status
-    if (res.ok) {
-      const html = await res.text()
-      result.detail += `, htmlLen=${html.length}`
-      const img = extractOgImage(html) ?? extractProfilePicFromScript(html)
-      if (img) result.imageUrl = img
+    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+
+    const html = await res.text()
+    result.detail += `, htmlLen=${html.length}`
+    const cdnUrl = extractOgImage(html) ?? extractProfilePicFromScript(html)
+    if (!cdnUrl) { result.elapsedMs = Date.now() - start; return result }
+
+    result.detail += `, cdnUrl=${cdnUrl.substring(0, 80)}`
+
+    // Step 3: Build Wayback image proxy URL and try to download the image
+    // The im_ prefix tells Wayback to serve raw image bytes
+    const waybackImgUrl = `https://web.archive.org/web/${snapshot.timestamp}im_/${cdnUrl}`
+    let imgBuffer: Buffer | null = null
+    let imgContentType = "image/jpeg"
+
+    const imgRes = await fetch(waybackImgUrl, {
+      redirect: "follow",
+      cache: "no-store",
+      headers: { Accept: "image/*,*/*;q=0.8" },
+    })
+    const imgCt = imgRes.headers.get("content-type") || ""
+    result.detail += `, imgProxy=${imgRes.status},ct=${imgCt}`
+
+    if (imgRes.ok && imgCt.startsWith("image/")) {
+      imgBuffer = Buffer.from(await imgRes.arrayBuffer())
+      imgContentType = imgCt.split(";")[0]
+    }
+
+    // If Wayback proxy failed, try the CDN URL directly (might work for recent snapshots)
+    if (!imgBuffer) {
+      try {
+        const directRes = await fetch(cdnUrl, {
+          redirect: "follow",
+          cache: "no-store",
+          headers: { Accept: "image/*,*/*;q=0.8" },
+        })
+        const directCt = directRes.headers.get("content-type") || ""
+        result.detail += ` | direct=${directRes.status},ct=${directCt}`
+        if (directRes.ok && directCt.startsWith("image/")) {
+          imgBuffer = Buffer.from(await directRes.arrayBuffer())
+          imgContentType = directCt.split(";")[0]
+        }
+      } catch { /* ignore */ }
+    }
+
+    // Step 4: Upload to Supabase storage if we got image bytes
+    if (imgBuffer && imgBuffer.length > 1000) {
+      try {
+        const supabase = createServiceClient()
+        const ext = imgContentType.includes("png") ? "png" : "jpg"
+        const fileName = `ig-${username}-${Date.now()}.${ext}`
+
+        const { error: uploadError } = await supabase.storage
+          .from("profile-images")
+          .upload(fileName, imgBuffer, { contentType: imgContentType, upsert: false })
+
+        if (!uploadError) {
+          const { data: publicUrl } = supabase.storage
+            .from("profile-images")
+            .getPublicUrl(fileName)
+          result.imageUrl = publicUrl.publicUrl
+          result.detail += `, uploaded=${fileName}`
+        } else {
+          result.detail += `, uploadErr=${uploadError.message}`
+        }
+      } catch (err) {
+        result.detail += `, supabaseErr=${String(err)}`
+      }
+    }
+
+    // If upload failed, return the CDN URL as a fallback
+    if (!result.imageUrl && cdnUrl) {
+      result.imageUrl = cdnUrl
     }
   } catch (err) {
     result.error = String(err)
