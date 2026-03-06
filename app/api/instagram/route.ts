@@ -27,8 +27,81 @@ function isValidInstagramImageUrl(url: string): boolean {
   )
 }
 
+// ─── Deep HTML extraction ────────────────────────────────────────────
+// Instagram embeds user data in JS blobs even on login walls.
+// This function searches through the full HTML for profile pic URLs.
+function extractProfilePicFromHtml(html: string): string | null {
+  // 1. Standard profile_pic_url_hd / profile_pic_url in JSON
+  const jsonPicMatch =
+    html.match(/"profile_pic_url_hd"\s*:\s*"(https?:[^"]+)"/) ??
+    html.match(/"profile_pic_url"\s*:\s*"(https?:[^"]+)"/)
+  if (jsonPicMatch?.[1]) {
+    const decoded = jsonPicMatch[1]
+      .replace(/\\u0026/g, "&")
+      .replace(/\\\//g, "/")
+      .replace(/\\u003C/g, "<")
+      .replace(/\\u003E/g, ">")
+    if (isValidInstagramImageUrl(decoded)) return decoded
+  }
+
+  // 2. og:image meta tag
+  const ogMatch =
+    html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*\/?>/i) ??
+    html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["'][^>]*\/?>/i)
+  if (ogMatch?.[1] && isValidInstagramImageUrl(ogMatch[1])) return ogMatch[1]
+
+  // 3. LD+JSON structured data
+  const ldJsonBlocks = html.matchAll(/<script\s+type="application\/ld\+json"[^>]*>([\s\S]*?)<\/script>/gi)
+  for (const block of ldJsonBlocks) {
+    try {
+      const data = JSON.parse(block[1])
+      const img = data?.image || data?.thumbnailUrl || data?.mainEntityOfPage?.image
+      if (typeof img === "string" && isValidInstagramImageUrl(img)) return img
+    } catch { /* skip */ }
+  }
+
+  // 4. Look for "hd_profile_pic_url_info" which has a URL
+  const hdPicMatch = html.match(/"hd_profile_pic_url_info"\s*:\s*\{[^}]*"url"\s*:\s*"(https?:[^"]+)"/)
+  if (hdPicMatch?.[1]) {
+    const decoded = hdPicMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
+    if (isValidInstagramImageUrl(decoded)) return decoded
+  }
+
+  // 5. Find any scontent CDN URLs that look like profile pictures
+  // Profile pics typically have /v/t51 or /v/t1 in the path
+  const scontentMatches = html.matchAll(/"(https?:\\?\/\\?\/scontent[^"]+)"/g)
+  for (const m of scontentMatches) {
+    const decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
+    // Profile pics are usually small-ish image files
+    if (decoded.includes("/v/t51") || decoded.includes("/v/t1")) {
+      if (isValidInstagramImageUrl(decoded)) return decoded
+    }
+  }
+
+  // 6. Search for any fbcdn.net URLs with image patterns
+  const fbcdnMatches = html.matchAll(/"(https?:\\?\/\\?\/[^"]*fbcdn\.net[^"]*(?:\.jpg|\.jpeg|\.png|\.webp)[^"]*)"/g)
+  for (const m of fbcdnMatches) {
+    const decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
+    if (isValidInstagramImageUrl(decoded)) return decoded
+  }
+
+  return null
+}
+
+// For debug: find ALL potential image URLs in HTML
+function findAllCdnUrls(html: string): string[] {
+  const urls: string[] = []
+  const allMatches = html.matchAll(/"(https?:\\?\/\\?\/(?:scontent|[^"]*fbcdn\.net|[^"]*cdninstagram)[^"]*)"/g)
+  for (const m of allMatches) {
+    let decoded = m[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/").replace(/\\\\/g, "")
+    // Skip static assets
+    if (decoded.includes("/rsrc.php/") || decoded.includes("static.cdninstagram.com")) continue
+    if (!urls.includes(decoded)) urls.push(decoded)
+  }
+  return urls.slice(0, 20) // max 20
+}
+
 // ─── Debug result type ───────────────────────────────────────────────
-// When debug=1 is passed, we return these for every strategy.
 interface StrategyResult {
   name: string
   status: number | null
@@ -38,6 +111,7 @@ interface StrategyResult {
   error: string | null
   loginWall: boolean | null
   htmlLength: number | null
+  cdnUrls?: string[] // debug only: all CDN URLs found
 }
 
 // ─── Strategy 1: i.instagram.com internal API ────────────────────────
@@ -148,18 +222,8 @@ async function strategy3(username: string): Promise<StrategyResult> {
     result.bodyPreview = html.substring(0, 600)
     result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
 
-    const ogMatch =
-      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*\/?>/i) ??
-      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["'][^>]*\/?>/i)
-    if (ogMatch?.[1] && isValidInstagramImageUrl(ogMatch[1])) {
-      result.imageUrl = ogMatch[1]
-    } else {
-      const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"(https:[^"]+)"/) ?? html.match(/"profile_pic_url"\s*:\s*"(https:[^"]+)"/)
-      if (picMatch?.[1]) {
-        const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-        if (isValidInstagramImageUrl(decoded)) result.imageUrl = decoded
-      }
-    }
+    result.imageUrl = extractProfilePicFromHtml(html)
+    result.cdnUrls = findAllCdnUrls(html)
   } catch (err) {
     result.error = String(err)
   }
@@ -197,18 +261,8 @@ async function strategy4(username: string): Promise<StrategyResult> {
     result.bodyPreview = html.substring(0, 600)
     result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
 
-    const ogMatch =
-      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*\/?>/i) ??
-      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["'][^>]*\/?>/i)
-    if (ogMatch?.[1] && isValidInstagramImageUrl(ogMatch[1])) {
-      result.imageUrl = ogMatch[1]
-    } else {
-      const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"(https:[^"]+)"/) ?? html.match(/"profile_pic_url"\s*:\s*"(https:[^"]+)"/)
-      if (picMatch?.[1]) {
-        const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-        if (isValidInstagramImageUrl(decoded)) result.imageUrl = decoded
-      }
-    }
+    result.imageUrl = extractProfilePicFromHtml(html)
+    result.cdnUrls = findAllCdnUrls(html)
   } catch (err) {
     result.error = String(err)
   }
@@ -249,18 +303,8 @@ async function strategy5(username: string): Promise<StrategyResult> {
     result.bodyPreview = html.substring(0, 600)
     result.loginWall = html.includes("loginForm") || html.includes("/accounts/login")
 
-    const ogMatch =
-      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*\/?>/i) ??
-      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["'][^>]*\/?>/i)
-    if (ogMatch?.[1] && isValidInstagramImageUrl(ogMatch[1])) {
-      result.imageUrl = ogMatch[1]
-    } else {
-      const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"(https:[^"]+)"/) ?? html.match(/"profile_pic_url"\s*:\s*"(https:[^"]+)"/)
-      if (picMatch?.[1]) {
-        const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-        if (isValidInstagramImageUrl(decoded)) result.imageUrl = decoded
-      }
-    }
+    result.imageUrl = extractProfilePicFromHtml(html)
+    result.cdnUrls = findAllCdnUrls(html)
   } catch (err) {
     result.error = String(err)
   }
@@ -294,16 +338,8 @@ async function strategy6(username: string): Promise<StrategyResult> {
     result.htmlLength = html.length
     result.bodyPreview = html.substring(0, 600)
 
-    // Look for profile pic in embed HTML — multiple patterns
-    const picMatch =
-      html.match(/"profile_pic_url"\s*:\s*"(https:[^"]+)"/) ??
-      html.match(/class="[^"]*[Pp]rofile[^"]*"[^>]*src="([^"]+)"/) ??
-      html.match(/<img[^>]+class="[^"]*"[^>]+src="(https:\/\/[^"]*(?:instagram|cdninstagram|fbcdn)[^"]*)"/)
-
-    if (picMatch?.[1]) {
-      const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
-      if (isValidInstagramImageUrl(decoded)) result.imageUrl = decoded
-    }
+    result.imageUrl = extractProfilePicFromHtml(html)
+    result.cdnUrls = findAllCdnUrls(html)
   } catch (err) {
     result.error = String(err)
   }
