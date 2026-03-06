@@ -290,7 +290,7 @@ async function strategyScraperProxy(username: string): Promise<StrategyResult> {
   try {
     const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
     const res = await fetch(
-      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&render=false`,
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&premium=true&country_code=us`,
       { cache: "no-store" }
     )
     result.status = res.status
