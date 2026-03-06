@@ -48,7 +48,8 @@ export async function POST(request: NextRequest) {
           host.includes("cdninstagram") ||
           host.includes("fbcdn") ||
           host.includes("scontent") ||
-          host === "unavatar.io"
+          host === "unavatar.io" ||
+          host.endsWith("archive.org")
         if (!autoImageUrl.startsWith("https://") || !allowed) {
           return NextResponse.json(
             { success: false, message: "Invalid image URL source" },

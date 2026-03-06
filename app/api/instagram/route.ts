@@ -21,7 +21,8 @@ function isRealProfilePicUrl(url: string): boolean {
   return (
     url.includes("scontent") ||
     url.includes("fbcdn") ||
-    url.includes("cdninstagram.com/v")
+    url.includes("cdninstagram.com/v") ||
+    url.includes("web.archive.org/web/")
   )
 }
 
@@ -207,12 +208,24 @@ async function strategyUnavatar(username: string): Promise<StrategyResult> {
   return result
 }
 
+// Helper: decode HTML entities in URLs
+function decodeHtmlEntities(url: string): string {
+  return url
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+}
+
 // Helper: extract og:image from HTML
 function extractOgImage(html: string): string | null {
   const ogMatch =
     html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
     html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
-  return ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1]) ? ogMatch[1] : null
+  if (!ogMatch?.[1]) return null
+  const decoded = decodeHtmlEntities(ogMatch[1])
+  return isRealProfilePicUrl(decoded) ? decoded : null
 }
 
 // Helper: extract profile_pic_url from embedded JSON in HTML
@@ -220,7 +233,7 @@ function extractProfilePicFromScript(html: string): string | null {
   const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
                    html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
   if (picMatch?.[1]) {
-    const decoded = picMatch[1].replace(/\\u0026/g, "&").replace(/\\\//g, "/")
+    const decoded = decodeHtmlEntities(picMatch[1].replace(/\\u0026/g, "&").replace(/\\\/\//g, "/"))
     if (isRealProfilePicUrl(decoded)) return decoded
   }
   return null
