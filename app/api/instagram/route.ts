@@ -213,8 +213,8 @@ async function strategyUnavatar(username: string): Promise<StrategyResult> {
   }
   const start = Date.now()
   try {
-    // Use GET (not HEAD) and follow redirects — check response content-type
-    const url = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
+    // Use GET and follow redirects — download the image to verify it's real
+    const url = `https://unavatar.io/instagram/${encodeURIComponent(username)}?fallback=false`
     const res = await fetch(url, {
       redirect: "follow",
       cache: "no-store",
@@ -225,11 +225,20 @@ async function strategyUnavatar(username: string): Promise<StrategyResult> {
     })
     result.status = res.status
     const ct = res.headers.get("content-type") || ""
-    result.detail = `ct=${ct}, finalUrl=${res.url}`
 
     if (res.ok && ct.startsWith("image/")) {
-      // It returned an actual image — use the URL directly
-      result.imageUrl = url
+      // Read the image bytes to verify it's a real profile pic, not a logo
+      const bytes = await res.arrayBuffer()
+      const size = bytes.byteLength
+      result.detail = `ct=${ct}, size=${size}, finalUrl=${res.url}`
+      // Real profile pics are typically > 5KB; Instagram logo fallbacks are tiny
+      if (size > 5000) {
+        result.imageUrl = `https://unavatar.io/instagram/${encodeURIComponent(username)}`
+      } else {
+        result.error = `Image too small (${size} bytes) — likely a fallback logo`
+      }
+    } else {
+      result.detail = `ct=${ct}, finalUrl=${res.url}`
     }
   } catch (err) {
     result.error = String(err)
