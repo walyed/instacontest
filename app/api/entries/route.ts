@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server"
 import { createServiceClient } from "@/lib/supabase-server"
 import crypto from "crypto"
 
-// POST - Fallback: submit entry with a manually-uploaded image (multipart/form-data)
+// POST - Submit a contest entry.
+//   Accepts either:
+//     • A manually uploaded image file  (multipart field "image")
+//     • An auto-fetched Instagram image URL (multipart field "autoImageUrl")
+//   In the autoImageUrl case the server downloads the image itself so
+//   the user's browser never touches Instagram directly.
 export async function POST(request: NextRequest) {
   try {
     const supabase = createServiceClient()
@@ -11,26 +16,74 @@ export async function POST(request: NextRequest) {
     const handle = (formData.get("handle") as string)?.trim()
     const contact = (formData.get("contact") as string | null)?.trim() || null
     const imageFile = formData.get("image") as File | null
+    const autoImageUrl = (formData.get("autoImageUrl") as string | null)?.trim() || null
 
     if (!handle) {
       return NextResponse.json({ success: false, message: "Instagram handle is required" }, { status: 400 })
     }
-    if (!imageFile || imageFile.size === 0) {
+    if (!imageFile && !autoImageUrl) {
       return NextResponse.json({ success: false, message: "Profile image is required" }, { status: 400 })
     }
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
       return NextResponse.json({ success: false, message: "Invalid email" }, { status: 400 })
     }
 
-    // Upload to Supabase Storage
-    const ext = imageFile.name.split(".").pop()?.toLowerCase() || "jpg"
-    const safeExt = ["jpg", "jpeg", "png", "gif", "webp"].includes(ext) ? ext : "jpg"
+    let buffer: Buffer
+    let contentType: string
+    let safeExt: string
+
+    if (imageFile && imageFile.size > 0) {
+      // ── Manual file upload path ──────────────────────────────────
+      const ext = imageFile.name.split(".").pop()?.toLowerCase() || "jpg"
+      safeExt = ["jpg", "jpeg", "png", "gif", "webp"].includes(ext) ? ext : "jpg"
+      contentType = imageFile.type || "image/jpeg"
+      buffer = Buffer.from(await imageFile.arrayBuffer())
+    } else if (autoImageUrl) {
+      // ── Auto-fetched URL path ────────────────────────────────────
+      // Validate the URL comes from Instagram/Facebook CDN to prevent SSRF
+      if (
+        !autoImageUrl.startsWith("https://") ||
+        !(
+          autoImageUrl.includes("instagram") ||
+          autoImageUrl.includes("cdninstagram") ||
+          autoImageUrl.includes("fbcdn")
+        )
+      ) {
+        return NextResponse.json(
+          { success: false, message: "Invalid image URL source" },
+          { status: 400 }
+        )
+      }
+
+      // Download image server-side
+      const imgRes = await fetch(autoImageUrl, { cache: "no-store" })
+      if (!imgRes.ok) {
+        return NextResponse.json(
+          { success: false, message: "Failed to download the auto-fetched image" },
+          { status: 502 }
+        )
+      }
+      buffer = Buffer.from(await imgRes.arrayBuffer())
+      contentType = imgRes.headers.get("content-type") || "image/jpeg"
+
+      // Derive extension from content type
+      const typeToExt: Record<string, string> = {
+        "image/jpeg": "jpg",
+        "image/png": "png",
+        "image/gif": "gif",
+        "image/webp": "webp",
+      }
+      safeExt = typeToExt[contentType] || "jpg"
+    } else {
+      return NextResponse.json({ success: false, message: "Profile image is required" }, { status: 400 })
+    }
+
+    // ── Upload to Supabase Storage ─────────────────────────────────
     const fileName = `${crypto.randomUUID()}.${safeExt}`
-    const buffer = Buffer.from(await imageFile.arrayBuffer())
 
     const { error: uploadError } = await supabase.storage
       .from("profile-images")
-      .upload(fileName, buffer, { contentType: imageFile.type, upsert: false })
+      .upload(fileName, buffer, { contentType, upsert: false })
 
     if (uploadError) {
       console.error("Storage upload error:", uploadError)
@@ -41,7 +94,7 @@ export async function POST(request: NextRequest) {
       .from("profile-images")
       .getPublicUrl(fileName)
 
-    // Insert entry row
+    // ── Insert entry row ───────────────────────────────────────────
     const { error: dbError } = await supabase.from("entries").insert({
       handle: handle.replace(/^@/, ""),
       contact,

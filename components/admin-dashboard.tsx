@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Download, CheckCircle, LogOut, Loader2, RefreshCw } from "lucide-react"
+import { Download, CheckCircle, LogOut, Loader2, RefreshCw, ImageDown } from "lucide-react"
 
 interface Entry {
   id: string
@@ -91,16 +91,24 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
     }
   }
 
+  // CSV-escape: wrap in quotes if the value contains commas, quotes, or newlines
+  function csvEscape(value: string): string {
+    if (/[,"\n\r]/.test(value)) {
+      return `"${value.replace(/"/g, '""')}"`
+    }
+    return value
+  }
+
   function exportCSV() {
     const headers = ["Handle", "Image URL", "Contact", "Status", "Created At"]
     const rows = entries.map((e) => [
-      e.handle,
-      e.imageUrl,
-      e.contact || "",
-      e.status,
-      e.createdAt,
+      csvEscape(e.handle),
+      csvEscape(e.imageUrl),
+      csvEscape(e.contact || ""),
+      csvEscape(e.status),
+      csvEscape(e.createdAt),
     ])
-    const csvContent = [headers, ...rows].map((r) => r.join(",")).join("\n")
+    const csvContent = [headers.map(csvEscape), ...rows].map((r) => r.join(",")).join("\n")
     const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" })
     const url = URL.createObjectURL(blob)
     const link = document.createElement("a")
@@ -108,6 +116,24 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
     link.download = "contest-entries.csv"
     link.click()
     URL.revokeObjectURL(url)
+  }
+
+  // Download a single profile image
+  async function downloadImage(entry: Entry) {
+    try {
+      const res = await fetch(entry.imageUrl)
+      const blob = await res.blob()
+      const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg"
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement("a")
+      link.href = url
+      link.download = `${entry.handle}.${ext}`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // Fallback: open in new tab
+      window.open(entry.imageUrl, "_blank")
+    }
   }
 
   if (loading) {
@@ -202,13 +228,14 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
                 <TableHead className="hidden md:table-cell">Contact</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead className="hidden sm:table-cell">Date</TableHead>
+                <TableHead>Image</TableHead>
                 <TableHead className="text-right">Action</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {filteredEntries.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={6} className="h-24 text-center text-muted-foreground">
+                  <TableCell colSpan={7} className="h-24 text-center text-muted-foreground">
                     No entries found
                   </TableCell>
                 </TableRow>
@@ -216,11 +243,13 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
                 filteredEntries.map((entry) => (
                   <TableRow key={entry.id}>
                     <TableCell>
-                      <img
-                        src={entry.imageUrl}
-                        alt={`Avatar for ${entry.handle}`}
-                        className="h-9 w-9 rounded-full bg-muted object-cover"
-                      />
+                      <a href={entry.imageUrl} target="_blank" rel="noopener noreferrer" title="View full image">
+                        <img
+                          src={entry.imageUrl}
+                          alt={`Avatar for ${entry.handle}`}
+                          className="h-9 w-9 rounded-full bg-muted object-cover ring-offset-background transition-all hover:ring-2 hover:ring-ring hover:ring-offset-2"
+                        />
+                      </a>
                     </TableCell>
                     <TableCell className="font-medium text-card-foreground">
                       {entry.handle}
@@ -239,6 +268,16 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
                     </TableCell>
                     <TableCell className="hidden sm:table-cell text-muted-foreground">
                       {new Date(entry.createdAt).toLocaleDateString()}
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => downloadImage(entry)}
+                        title="Download image"
+                      >
+                        <ImageDown className="h-4 w-4" />
+                      </Button>
                     </TableCell>
                     <TableCell className="text-right">
                       {entry.status === "pending" ? (
