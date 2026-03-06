@@ -316,7 +316,7 @@ async function strategyPixwox(username: string): Promise<StrategyResult> {
   return result
 }
 
-const ALL_STRATEGIES = [strategyPicuki, strategyImginn, strategyGramhir, strategyUnavatar, strategyInstagramApi, strategyPixwox]
+const ALL_STRATEGIES = [strategyUnavatar, strategyInstagramApi, strategyPicuki, strategyImginn, strategyGramhir, strategyPixwox]
 
 /**
  * GET /api/instagram?username=<handle>
