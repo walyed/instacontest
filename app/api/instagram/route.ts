@@ -240,6 +240,49 @@ function extractProfilePicFromScript(html: string): string | null {
   return null
 }
 
+// ─── Strategy: Self-hosted residential proxy ─────────────────────────
+// Calls the user's local Python proxy (exposed via Cloudflare Tunnel).
+// This is the most reliable strategy because it uses a residential IP.
+// Requires IG_PROXY_URL env var set to the tunnel URL.
+async function strategyLocalProxy(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "local-proxy",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const proxyUrl = process.env.IG_PROXY_URL
+  if (!proxyUrl) {
+    result.error = "IG_PROXY_URL not configured"
+    return result
+  }
+  const start = Date.now()
+  try {
+    const res = await fetch(
+      `${proxyUrl}/api/instagram?username=${encodeURIComponent(username)}`,
+      {
+        headers: {
+          "x-proxy-secret": "instacontest-proxy-2026",
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      }
+    )
+    result.status = res.status
+    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
+
+    const data = await res.json()
+    result.detail = `error=${data.error ?? "none"}`
+    if (data.image && isRealProfilePicUrl(data.image)) {
+      result.imageUrl = data.image
+    } else if (data.image) {
+      result.detail += `, imgUrl=${data.image.substring(0, 80)}`
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
 // ─── Strategy: Google Cache ──────────────────────────────────────────
 // Google's cache serves pages that were crawled by Googlebot.
 // Instagram allows Googlebot, so cached pages contain real og:image.
@@ -528,9 +571,10 @@ async function strategyMicrolink(username: string): Promise<StrategyResult> {
 }
 
 const ALL_STRATEGIES = [
-  strategyGoogleCache,    // Google's cached version (Googlebot is allowed by Instagram)
+  strategyLocalProxy,     // Self-hosted residential proxy (most reliable)
+  strategyGoogleCache,    // Google's cached version
   strategyWaybackMachine, // Wayback Machine archived version
-  strategyEmbed,          // Instagram embed endpoint (different blocking rules)
+  strategyEmbed,          // Instagram embed endpoint
   strategyAllOrigins,     // allorigins.win CORS proxy
   strategyScraperProxy,   // ScraperAPI datacenter proxy
   strategyMicrolink,      // Microlink with prerender
