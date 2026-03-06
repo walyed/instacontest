@@ -37,8 +37,11 @@ export function ContestEntryForm() {
 
     setFetchingImage(true)
     try {
+      console.log(`[auto-fetch] Calling /api/instagram?username=${clean}`)
       const res = await fetch(`/api/instagram?username=${encodeURIComponent(clean)}`)
+      console.log(`[auto-fetch] Response status: ${res.status}`)
       const data = await res.json()
+      console.log(`[auto-fetch] Response data:`, data)
       if (data.image) {
         setAutoImageUrl(data.image)
         // Clear the "image required" error when auto-fetch succeeds
@@ -48,9 +51,11 @@ export function ContestEntryForm() {
           return next
         })
       } else {
+        console.log(`[auto-fetch] No image in response, error: ${data.error}`)
         setAutoImageUrl(null)
       }
-    } catch {
+    } catch (err) {
+      console.error(`[auto-fetch] Exception:`, err)
       setAutoImageUrl(null)
     } finally {
       setFetchingImage(false)
