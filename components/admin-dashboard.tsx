@@ -11,7 +11,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Download, CheckCircle, LogOut, Loader2, RefreshCw, ImageDown } from "lucide-react"
+import { Download, CheckCircle, CheckCheck, LogOut, Loader2, RefreshCw, ImageDown } from "lucide-react"
 
 interface Entry {
   id: string
@@ -89,6 +89,58 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
     } catch {
       // silently fail
     }
+  }
+
+  // ─── Mark all pending entries as ready ──────────────────────────────
+  const [markingAll, setMarkingAll] = useState(false)
+
+  async function markAllReady() {
+    if (pendingCount === 0) return
+    setMarkingAll(true)
+    try {
+      const res = await fetch("/api/entries/mark-all-ready", {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${password}` },
+      })
+      if (res.ok) {
+        setEntries((prev) =>
+          prev.map((entry) =>
+            entry.status === "pending" ? { ...entry, status: "ready" as const } : entry
+          )
+        )
+      }
+    } catch {
+      // silently fail
+    } finally {
+      setMarkingAll(false)
+    }
+  }
+
+  // ─── Download all profile images as individual files ───────────────
+  const [downloadingAll, setDownloadingAll] = useState(false)
+
+  async function downloadAllImages() {
+    const list = filteredEntries.filter((e) => e.imageUrl)
+    if (list.length === 0) return
+    setDownloadingAll(true)
+    for (const entry of list) {
+      try {
+        const res = await fetch(entry.imageUrl)
+        const blob = await res.blob()
+        const ext = blob.type.split("/")[1]?.split("+")[0] || "jpg"
+        const url = URL.createObjectURL(blob)
+        const link = document.createElement("a")
+        link.href = url
+        link.download = `${entry.handle}.${ext}`
+        link.click()
+        URL.revokeObjectURL(url)
+        // small delay so browser can handle each download
+        await new Promise((r) => setTimeout(r, 300))
+      } catch {
+        // skip failed downloads
+      }
+    }
+    setDownloadingAll(false)
   }
 
   // CSV-escape: wrap in quotes if the value contains commas, quotes, or newlines
@@ -175,6 +227,24 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
             <Button variant="outline" size="sm" onClick={fetchEntries}>
               <RefreshCw className="h-4 w-4" />
               Refresh
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={markAllReady}
+              disabled={markingAll || pendingCount === 0}
+            >
+              {markingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCheck className="h-4 w-4" />}
+              Mark All Ready
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={downloadAllImages}
+              disabled={downloadingAll || filteredEntries.length === 0}
+            >
+              {downloadingAll ? <Loader2 className="h-4 w-4 animate-spin" /> : <ImageDown className="h-4 w-4" />}
+              Download All
             </Button>
             <Button variant="outline" size="sm" onClick={exportCSV}>
               <Download className="h-4 w-4" />
