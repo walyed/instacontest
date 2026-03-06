@@ -207,9 +207,116 @@ async function strategyUnavatar(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy: Microlink.io metadata extraction ──────────────────────
-// Microlink fetches pages from ITS servers (different IPs than Vercel)
-// and extracts og:image. Free tier: 50 req/day.
+// Helper: extract og:image from HTML
+function extractOgImage(html: string): string | null {
+  const ogMatch =
+    html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
+    html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
+  return ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1]) ? ogMatch[1] : null
+}
+
+// ─── Strategy: ScraperAPI (standard datacenter, then with JS render) ─
+// Free plan: 5000 credits. Standard = 1 credit. Render = 10 credits.
+// ScraperAPI uses different datacenter IPs than Vercel — may not be blocked.
+async function strategyScraperProxy(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "scraper-proxy",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const apiKey = process.env.SCRAPER_API_KEY
+  if (!apiKey) {
+    result.error = "SCRAPER_API_KEY not configured"
+    return result
+  }
+  const start = Date.now()
+  const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+
+  // First try: standard datacenter proxy (1 credit)
+  try {
+    const res = await fetch(
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (res.ok) {
+      const html = await res.text()
+      result.detail = `std: htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
+      const img = extractOgImage(html)
+      if (img) { result.imageUrl = img; result.elapsedMs = Date.now() - start; return result }
+    }
+  } catch (err) {
+    result.detail = `std: ${String(err)}`
+  }
+
+  // Second try: with JavaScript rendering (10 credits)
+  try {
+    const res = await fetch(
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&render=true`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (res.ok) {
+      const html = await res.text()
+      result.detail = (result.detail ?? "") + ` | render: htmlLen=${html.length}`
+      const img = extractOgImage(html)
+      if (img) { result.imageUrl = img }
+      // Also check for profile_pic_url in JSON-LD or script tags
+      if (!img) {
+        const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
+                         html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
+        if (picMatch?.[1]) {
+          const decoded = picMatch[1].replace(/\\u0026/g, "&")
+          if (isRealProfilePicUrl(decoded)) result.imageUrl = decoded
+        }
+      }
+    }
+  } catch (err) {
+    result.detail = (result.detail ?? "") + ` | render: ${String(err)}`
+  }
+
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy: allorigins.win CORS proxy ─────────────────────────────
+// Routes the request through allorigins.win servers (different IPs).
+async function strategyAllOrigins(username: string): Promise<StrategyResult> {
+  const result: StrategyResult = {
+    name: "allorigins",
+    status: null, elapsedMs: 0, imageUrl: null, error: null,
+  }
+  const start = Date.now()
+  try {
+    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+    const res = await fetch(
+      `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+      { cache: "no-store" }
+    )
+    result.status = res.status
+    if (res.ok) {
+      const html = await res.text()
+      result.detail = `htmlLen=${html.length}, loginWall=${html.includes("/accounts/login")}`
+      const img = extractOgImage(html)
+      if (img) result.imageUrl = img
+      // Also check for embedded JSON profile pic
+      if (!img) {
+        const picMatch = html.match(/"profile_pic_url_hd"\s*:\s*"([^"]+)"/) ??
+                         html.match(/"profile_pic_url"\s*:\s*"([^"]+)"/)
+        if (picMatch?.[1]) {
+          const decoded = picMatch[1].replace(/\\u0026/g, "&")
+          if (isRealProfilePicUrl(decoded)) result.imageUrl = decoded
+        }
+      }
+    }
+  } catch (err) {
+    result.error = String(err)
+  }
+  result.elapsedMs = Date.now() - start
+  return result
+}
+
+// ─── Strategy: Microlink with prerender ──────────────────────────────
+// Microlink prerender uses headless Chrome to fetch pages.
 async function strategyMicrolink(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
     name: "microlink",
@@ -219,7 +326,7 @@ async function strategyMicrolink(username: string): Promise<StrategyResult> {
   try {
     const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
     const res = await fetch(
-      `https://api.microlink.io/?url=${encodeURIComponent(targetUrl)}`,
+      `https://api.microlink.io/?url=${encodeURIComponent(targetUrl)}&prerender=true&meta=true`,
       { cache: "no-store" }
     )
     result.status = res.status
@@ -241,44 +348,11 @@ async function strategyMicrolink(username: string): Promise<StrategyResult> {
   return result
 }
 
-// ─── Strategy: jsonlink.io OG tag extraction ─────────────────────────
-// Another third-party service that extracts Open Graph tags from its own IPs.
-async function strategyJsonLink(username: string): Promise<StrategyResult> {
+// ─── Strategy: ScraperAPI proxied Instagram API ──────────────────────
+// Route the Instagram internal API through ScraperAPI's IPs
+async function strategyScraperInstagramApi(username: string): Promise<StrategyResult> {
   const result: StrategyResult = {
-    name: "jsonlink",
-    status: null, elapsedMs: 0, imageUrl: null, error: null,
-  }
-  const start = Date.now()
-  try {
-    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
-    const res = await fetch(
-      `https://jsonlink.io/api/extract?url=${encodeURIComponent(targetUrl)}`,
-      { cache: "no-store" }
-    )
-    result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-    const data = await res.json()
-    const images: string[] = data?.images ?? []
-    result.detail = `images=${images.length}`
-    const realPic = images.find((u: string) => isRealProfilePicUrl(u))
-    if (realPic) {
-      result.imageUrl = realPic
-    } else if (images.length > 0) {
-      result.detail += `, first=${images[0]?.substring(0, 100)}`
-    }
-  } catch (err) {
-    result.error = String(err)
-  }
-  result.elapsedMs = Date.now() - start
-  return result
-}
-
-// ─── Strategy: ScraperAPI residential proxy (optional) ───────────────
-// Routes through residential IPs — guaranteed to bypass Instagram blocking.
-// Free: 1000 req/month at scraperapi.com. Set SCRAPER_API_KEY in Vercel env.
-async function strategyScraperProxy(username: string): Promise<StrategyResult> {
-  const result: StrategyResult = {
-    name: "scraper-proxy",
+    name: "scraper-ig-api",
     status: null, elapsedMs: 0, imageUrl: null, error: null,
   }
   const apiKey = process.env.SCRAPER_API_KEY
@@ -288,20 +362,29 @@ async function strategyScraperProxy(username: string): Promise<StrategyResult> {
   }
   const start = Date.now()
   try {
-    const targetUrl = `https://www.instagram.com/${encodeURIComponent(username)}/`
+    // Route the Instagram API endpoint through ScraperAPI
+    const igUrl = `https://i.instagram.com/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`
     const res = await fetch(
-      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(targetUrl)}&premium=true&country_code=us`,
-      { cache: "no-store" }
+      `https://api.scraperapi.com/?api_key=${encodeURIComponent(apiKey)}&url=${encodeURIComponent(igUrl)}`,
+      {
+        headers: {
+          "User-Agent": "Instagram 275.0.0.27.98 Android",
+          "x-ig-app-id": "936619743392459",
+        },
+        cache: "no-store",
+      }
     )
     result.status = res.status
-    if (!res.ok) { result.elapsedMs = Date.now() - start; return result }
-    const html = await res.text()
-    result.detail = `htmlLen=${html.length}`
-    const ogMatch =
-      html.match(/<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["']/i) ??
-      html.match(/<meta\s+[^>]*content=["']([^"']+)["'][^>]*property=["']og:image["']/i)
-    if (ogMatch?.[1] && isRealProfilePicUrl(ogMatch[1])) {
-      result.imageUrl = ogMatch[1]
+    if (res.ok) {
+      try {
+        const data = await res.json()
+        const pic = data?.data?.user?.profile_pic_url_hd || data?.data?.user?.profile_pic_url
+        if (pic && isRealProfilePicUrl(pic)) result.imageUrl = pic
+        result.detail = `hasUser=${!!data?.data?.user}`
+      } catch {
+        const text = await res.clone().text().catch(() => "")
+        result.error = `JSON parse failed, starts with: ${text.substring(0, 50)}`
+      }
     }
   } catch (err) {
     result.error = String(err)
@@ -311,13 +394,14 @@ async function strategyScraperProxy(username: string): Promise<StrategyResult> {
 }
 
 const ALL_STRATEGIES = [
-  strategyScraperProxy,   // Residential proxy (needs SCRAPER_API_KEY env var)
-  strategyMicrolink,      // Third-party metadata extraction
-  strategyJsonLink,       // Third-party OG extraction
-  strategySimpleOgImage,  // Direct og:image (Python-style)
-  strategyTopSearch,      // Direct Instagram search API
-  strategyInstagramApi,   // Direct Instagram API
-  strategyUnavatar,       // unavatar.io with validation
+  strategyScraperProxy,         // ScraperAPI: datacenter proxy, then JS render
+  strategyScraperInstagramApi,  // ScraperAPI: route IG internal API through proxy
+  strategyAllOrigins,           // allorigins.win CORS proxy
+  strategyMicrolink,            // Microlink with prerender
+  strategySimpleOgImage,        // Direct og:image (Python-style)
+  strategyTopSearch,            // Direct Instagram search API
+  strategyInstagramApi,         // Direct Instagram API
+  strategyUnavatar,             // unavatar.io with validation
 ]
 
 /**
