@@ -12,7 +12,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import { Download, CheckCircle, CheckCheck, LogOut, Loader2, RefreshCw, ImageDown } from "lucide-react"
+import { Download, CheckCircle, CheckCheck, LogOut, Loader2, RefreshCw, ImageDown, Trash2 } from "lucide-react"
 
 interface Entry {
   id: string
@@ -86,6 +86,21 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
             entry.id === id ? { ...entry, status: "ready" as const } : entry
           )
         )
+      }
+    } catch {
+      // silently fail
+    }
+  }
+
+  async function deleteEntry(id: string) {
+    if (!confirm("Delete this entry? This cannot be undone.")) return
+    try {
+      const res = await fetch(`/api/entries/${id}`, {
+        method: "DELETE",
+        headers: { Authorization: `Bearer ${password}` },
+      })
+      if (res.ok) {
+        setEntries((prev) => prev.filter((entry) => entry.id !== id))
       }
     } catch {
       // silently fail
@@ -358,18 +373,29 @@ export function AdminDashboard({ password, onLogout }: AdminDashboardProps) {
                       </Button>
                     </TableCell>
                     <TableCell className="text-right">
-                      {entry.status === "pending" ? (
+                      <div className="flex items-center justify-end gap-1">
+                        {entry.status === "pending" ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => markAsReady(entry.id)}
+                          >
+                            <CheckCircle className="h-4 w-4" />
+                            <span className="hidden sm:inline">Mark Ready</span>
+                          </Button>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Done</span>
+                        )}
                         <Button
                           variant="ghost"
                           size="sm"
-                          onClick={() => markAsReady(entry.id)}
+                          onClick={() => deleteEntry(entry.id)}
+                          className="text-destructive hover:text-destructive"
+                          title="Delete entry"
                         >
-                          <CheckCircle className="h-4 w-4" />
-                          <span className="hidden sm:inline">Mark Ready</span>
+                          <Trash2 className="h-4 w-4" />
                         </Button>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">Done</span>
-                      )}
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))
