@@ -14,6 +14,7 @@ export async function POST(request: NextRequest) {
     const formData = await request.formData()
 
     const handle = (formData.get("handle") as string)?.trim()
+    const normalizedHandle = handle?.replace(/^@/, "").trim().toLowerCase()
     const contact = (formData.get("contact") as string | null)?.trim() || null
     const imageFile = formData.get("image") as File | null
     const autoImageUrl = (formData.get("autoImageUrl") as string | null)?.trim() || null
@@ -21,11 +22,30 @@ export async function POST(request: NextRequest) {
     if (!handle) {
       return NextResponse.json({ success: false, message: "Instagram handle is required" }, { status: 400 })
     }
+    if (!normalizedHandle) {
+      return NextResponse.json({ success: false, message: "Instagram handle is required" }, { status: 400 })
+    }
     if (!imageFile && !autoImageUrl) {
       return NextResponse.json({ success: false, message: "Profile image is required" }, { status: 400 })
     }
     if (contact && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(contact)) {
       return NextResponse.json({ success: false, message: "Invalid email" }, { status: 400 })
+    }
+
+    // Prevent duplicate registrations for the same Instagram handle.
+    const { data: existingEntry, error: duplicateCheckError } = await supabase
+      .from("entries")
+      .select("id")
+      .ilike("handle", normalizedHandle)
+      .maybeSingle()
+
+    if (duplicateCheckError) {
+      console.error("Duplicate check error:", duplicateCheckError)
+      return NextResponse.json({ success: false, message: "Failed to validate entry" }, { status: 500 })
+    }
+
+    if (existingEntry) {
+      return NextResponse.json({ success: false, message: "Instagram handle already registered" }, { status: 409 })
     }
 
     let buffer: Buffer
@@ -104,7 +124,7 @@ export async function POST(request: NextRequest) {
 
     // ── Insert entry row ───────────────────────────────────────────
     const { error: dbError } = await supabase.from("entries").insert({
-      handle: handle.replace(/^@/, ""),
+      handle: normalizedHandle,
       contact,
       image_url: publicUrl.publicUrl,
       consent: true,
